@@ -31,13 +31,11 @@ run records a baseline and will not alert. Every later run compares against it.
 
 - **Trigger:** the current price is lower than the last price the watchdog saw.
 - **Baseline:** `data/prices.json`, committed back to the repo after each run.
-- **History:** every observation is appended to `data/price_history.csv`, so you get a
-  price trend over time, not just the latest value.
-- **Optional target price:** add `"alert_below": 12.50` to an item in `items.json` to also
-  alert the first time it drops to or below that figure.
+- **Contents:** the issue gives you the item link, the new price, the previous price and
+  the percentage off — plus the listed original price when the page advertises one.
 
 Once an alert fires, the new lower price becomes the baseline, so you get one issue per
-drop rather than a daily repeat.
+drop rather than a daily repeat. Price increases are recorded silently.
 
 ## If a check breaks
 

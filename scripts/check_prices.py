@@ -11,7 +11,6 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
-import csv
 import datetime as dt
 import gzip
 import html
@@ -388,56 +387,37 @@ def money(price: float, currency: str | None) -> str:
     return f"{price:,.2f} {currency or ''}".strip()
 
 
-def build_issue_body(alerts: list[dict], checked_at: str) -> str:
+def build_issue_body(drops: list[dict], checked_at: str) -> str:
     lines = [
         "Price drop detected on the watched Decathlon items.",
         "",
         "| Item | Previous | Now | Change |",
         "| --- | ---: | ---: | ---: |",
     ]
-    for alert in alerts:
-        currency = alert["currency"]
-        previous = alert.get("previous_price")
-        if previous:
-            change = f"−{(previous - alert['price']) / previous * 100:.0f}%"
-            previous_cell = money(previous, currency)
-        else:
-            change = "target hit"
-            previous_cell = "n/a"
+    for drop in drops:
+        currency = drop["currency"]
+        previous = drop["previous_price"]
+        pct = (previous - drop["price"]) / previous * 100
         lines.append(
-            f"| [{alert['name']}]({alert['url']}) "
-            f"| {previous_cell} "
-            f"| **{money(alert['price'], currency)}** "
-            f"| {change} |"
+            f"| [{drop['name']}]({drop['url']}) "
+            f"| {money(previous, currency)} "
+            f"| **{money(drop['price'], currency)}** "
+            f"| −{pct:.0f}% |"
         )
     lines.append("")
-    for alert in alerts:
-        currency = alert["currency"]
-        lines.append(f"### {alert['name']}")
-        lines.append(f"- Current price: **{money(alert['price'], currency)}**")
-        if alert.get("was_price"):
-            lines.append(f"- Listed original price: {money(alert['was_price'], currency)}")
-        if alert.get("previous_price"):
-            lines.append(
-                f"- Previous price seen by the watchdog: {money(alert['previous_price'], currency)}"
-            )
-        for reason in alert["reasons"]:
-            lines.append(f"- {reason}")
-        lines.append(f"- Link: {alert['url']}")
+    for drop in drops:
+        currency = drop["currency"]
+        lines.append(f"### {drop['name']}")
+        lines.append(f"- Current price: **{money(drop['price'], currency)}**")
+        if drop.get("was_price"):
+            lines.append(f"- Listed original price: {money(drop['was_price'], currency)}")
+        lines.append(
+            f"- Previous price seen by the watchdog: {money(drop['previous_price'], currency)}"
+        )
+        lines.append(f"- Link: {drop['url']}")
         lines.append("")
-    lines.append(f"_Checked at {checked_at}. Full price history: `data/price_history.csv`._")
+    lines.append(f"_Checked at {checked_at}._")
     return "\n".join(lines)
-
-
-def append_history(history_path: Path, rows: list[dict]) -> None:
-    fields = ["timestamp_utc", "name", "url", "currency", "price", "source"]
-    exists = history_path.exists()
-    history_path.parent.mkdir(parents=True, exist_ok=True)
-    with history_path.open("a", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
-        if not exists:
-            writer.writeheader()
-        writer.writerows(rows)
 
 
 def write_output(name: str, value: str) -> None:
@@ -458,7 +438,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Check Decathlon prices for drops.")
     parser.add_argument("--items", default=str(REPO_ROOT / "items.json"))
     parser.add_argument("--state", default=str(REPO_ROOT / "data" / "prices.json"))
-    parser.add_argument("--history", default=str(REPO_ROOT / "data" / "price_history.csv"))
     parser.add_argument("--issue-body", default=str(REPO_ROOT / "issue-body.md"))
     parser.add_argument(
         "--save-html",
@@ -483,8 +462,7 @@ def main() -> int:
             print("::warning::state file is corrupt, starting from an empty baseline", flush=True)
 
     checked_at = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
-    alerts: list[dict] = []
-    history_rows: list[dict] = []
+    drops: list[dict] = []
     failures: list[str] = []
 
     for item in items:
@@ -516,52 +494,25 @@ def main() -> int:
         previous_price = previous.get("price")
         previous_currency = previous.get("currency")
 
-        reasons: list[str] = []
+        note = ""
         if (
             isinstance(previous_price, (int, float))
             and previous_currency == currency
             and price < previous_price
         ):
-            reasons.append(
-                f"Price dropped from {money(float(previous_price), currency)} "
-                f"to {money(price, currency)} since the last check."
-            )
-
-        target = item.get("alert_below")
-        if target is not None and price <= float(target) and not (
-            isinstance(previous_price, (int, float)) and float(previous_price) <= float(target)
-        ):
-            reasons.append(f"Price is at or below your target of {money(float(target), currency)}.")
-
-        note = ""
-        if reasons:
-            note = " — ALERT"
-            alerts.append(
+            note = " — PRICE DROP"
+            drops.append(
                 {
                     "name": name,
                     "url": url,
                     "price": price,
-                    "previous_price": float(previous_price)
-                    if isinstance(previous_price, (int, float)) and previous_currency == currency
-                    else None,
+                    "previous_price": float(previous_price),
                     "currency": currency,
                     "was_price": result.get("was_price"),
-                    "reasons": reasons,
                 }
             )
         elif previous_price is None:
             note = " — first run, recording baseline"
-
-        history_rows.append(
-            {
-                "timestamp_utc": checked_at,
-                "name": name,
-                "url": url,
-                "currency": currency or "",
-                "price": f"{price:.2f}",
-                "source": result["method"],
-            }
-        )
 
         print(
             f"{name}: {money(price, currency)} "
@@ -589,16 +540,14 @@ def main() -> int:
         state_path.write_text(
             json.dumps(state, indent=2, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8"
         )
-        if history_rows:
-            append_history(Path(args.history), history_rows)
 
-    if alerts:
-        body = build_issue_body(alerts, checked_at)
+    if drops:
+        body = build_issue_body(drops, checked_at)
         Path(args.issue_body).write_text(body, encoding="utf-8")
-        headline = alerts[0]["name"] if len(alerts) == 1 else f"{len(alerts)} items"
+        headline = drops[0]["name"] if len(drops) == 1 else f"{len(drops)} items"
         write_output("has_drops", "true")
         write_output("issue_title", f"Price drop: {headline} ({checked_at[:10]})")
-        print(f"\n{len(alerts)} price alert(s) detected.", flush=True)
+        print(f"\n{len(drops)} price drop(s) detected.", flush=True)
     else:
         write_output("has_drops", "false")
         print("\nNo price drops detected.", flush=True)
