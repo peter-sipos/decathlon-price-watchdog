@@ -1,0 +1,68 @@
+name: Decathlon price watch
+
+on:
+  schedule:
+    # 05:00 UTC = 07:00 Europe/Prague in summer, 06:00 in winter.
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: price-watch
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check prices
+        id: check
+        run: python scripts/check_prices.py --save-html debug
+
+      - name: Open an issue about the price drop
+        if: always() && steps.check.outputs.has_drops == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TITLE: ${{ steps.check.outputs.issue_title }}
+        run: |
+          gh label create price-drop --color 0E8A16 --description "Watched item got cheaper" 2>/dev/null || true
+          gh issue create \
+            --title "$TITLE" \
+            --body-file issue-body.md \
+            --label price-drop \
+            --assignee "${{ github.repository_owner }}"
+
+      - name: Commit updated prices
+        if: always()
+        run: |
+          rm -f issue-body.md
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/
+          git diff --cached --quiet && exit 0
+          git commit -m "Update Decathlon price data"
+          for attempt in 1 2 3 4; do
+            git push && exit 0
+            sleep $((2 ** attempt))
+            git pull --rebase origin "${GITHUB_REF_NAME}" || true
+          done
+          echo "::error::could not push the updated price data"
+          exit 1
+
+      - name: Upload fetched pages for debugging
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fetched-pages
+          path: debug/
+          retention-days: 7
+          if-no-files-found: ignore
