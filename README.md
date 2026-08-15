@@ -71,7 +71,9 @@ workflow passes it through. Ready-made templates for `proxy_template` in `items.
 | ZenRows | `https://api.zenrows.com/v1/?apikey={key}&url={url_encoded}&premium_proxy=true` |
 
 `{url}`, `{url_encoded}` and `{key}` are substituted; `proxy_key_env` overrides which
-environment variable holds the key.
+environment variable holds the key. The key is redacted from every log line, error
+message and uploaded debug file, and debug filenames derive from the plain URL, so a key
+cannot leak through a filename either.
 
 ### Paying the cheap tier first
 
@@ -86,9 +88,7 @@ overpay on every run for capability that may not be needed. The shipped ladder i
 
 When a run has to escalate it logs `needed proxy tier N` as a warning. If you see tier 3
 every day, move it to the front of the list to stop wasting the two cheaper attempts —
-and if you never see a warning, the cheapest tier is doing the job. The key is redacted from every log line, error
-message and uploaded debug file, and debug filenames are derived from the plain URL so a
-key cannot leak through a filename.
+and if you never see a warning, the cheapest tier is doing the job.
 
 ### Watch your credit budget
 
@@ -97,14 +97,13 @@ credits per request rather than one. Exact costs vary by provider and change ove
 so check your dashboard after the first few runs — treat the numbers below as arithmetic
 to redo against your own plan, not as quoted prices.
 
-At 2 requests a day (~60 a month) the cheapest tier is comfortable. If every request has
-to escalate to the most expensive tier, a daily schedule can exceed a 1,000-credit
-allowance, in which case switch to every other day.
+The default configuration is deliberately frugal: it reads the **two Heureka search
+pages** (one CZ, one SK), each covering two products, so a run costs 2 requests — roughly
+60 a month. Watching the four Decathlon pages directly would double that.
 
-The default configuration is chosen to be frugal: it reads the **two Heureka search
-pages** (one CZ, one SK), each covering two products, so one run costs 2 requests —
-roughly 60 a month. Watching the four Decathlon pages directly would double that. If
-credits still run short, drop the schedule to every other day (`0 5 */2 * *`).
+At 2 requests a day on the cheapest tier that is comfortable. If every request has to
+escalate to the most expensive tier, a daily schedule can exceed a 1,000-credit
+allowance; drop the schedule to every other day (`0 5 */2 * *`) if so.
 
 Two caveats about reading from Heureka:
 
