@@ -24,6 +24,7 @@ import tempfile
 import time
 import unicodedata
 import urllib.error
+import urllib.parse
 import urllib.request
 import zlib
 from html.parser import HTMLParser
@@ -111,6 +112,37 @@ BLOCK_TITLES = (
     "unusual traffic",
     "security check",
 )
+
+
+# API keys reach this script through the environment and must never appear in a log
+# line, an error message or an uploaded debug file — the artifact is readable by
+# anyone who can read the repository.
+_SECRETS: set[str] = set()
+
+
+def redact(text: str) -> str:
+    for secret in _SECRETS:
+        if secret:
+            text = text.replace(secret, "***REDACTED***")
+    return text
+
+
+def build_fetch_url(item: dict, url: str) -> str:
+    """Apply the item's scraping-service template, if it has one.
+
+    Templates take ``{url}``, ``{url_encoded}`` and ``{key}``, which covers the
+    scraping APIs worth using; see the README for ready-made templates.
+    """
+    template = item.get("proxy_template")
+    if not template:
+        return url
+    key_env = item.get("proxy_key_env", "SCRAPER_API_KEY")
+    key = os.environ.get(key_env, "").strip()
+    if "{key}" in template and not key:
+        raise FetchError(f"{key_env} is not set, but proxy_template needs an API key")
+    if key:
+        _SECRETS.add(key)
+    return template.format(url=url, url_encoded=urllib.parse.quote(url, safe=""), key=key)
 
 
 def browser_headers(accept_language: str, url: str) -> dict[str, str]:
@@ -367,7 +399,7 @@ def fetch(
 
 def save_debug(debug_dir: Path, filename: str, content: str) -> None:
     debug_dir.mkdir(parents=True, exist_ok=True)
-    (debug_dir / filename).write_text(content, encoding="utf-8", errors="replace")
+    (debug_dir / filename).write_text(redact(content), encoding="utf-8", errors="replace")
 
 
 # --------------------------------------------------------------------------- parsing helpers
@@ -958,25 +990,34 @@ def main() -> int:
         listing = "search_url" in item
         url = item["search_url"] if listing else item["url"]
         link = item.get("product_url", url)
-        # Routing through a reader proxy makes the origin see the proxy's IP rather
-        # than the runner's, which is what Cloudflare is judging. Set e.g.
-        # "proxy_template": "https://r.jina.ai/{url}" once a working one is known.
-        if item.get("proxy_template"):
-            url = item["proxy_template"].format(url=url)
         key = item.get("id", link)
         name = item.get("name", link)
+        # The slug comes from the plain URL, never the templated one, so an API key
+        # cannot end up in a debug filename.
         slug = re.sub(r"[^a-zA-Z0-9]+", "-", url).strip("-")[-80:]
+
+        # Routing through a scraping service makes the origin see that service's IP
+        # rather than the runner's, which is what Cloudflare is judging.
+        try:
+            fetch_url = build_fetch_url(item, url)
+        except FetchError as exc:
+            failures.append(f"{name}: {exc}")
+            print(f"::error::{name}: {exc}", flush=True)
+            continue
 
         if url not in pages:
             try:
                 pages[url] = fetch(
-                    url, item.get("accept_language", "en;q=0.9"), debug_dir=debug_dir, slug=slug
+                    fetch_url,
+                    item.get("accept_language", "en;q=0.9"),
+                    debug_dir=debug_dir,
+                    slug=slug,
                 )
                 if args.save_html:
                     save_debug(debug_dir, f"{slug}.ok.html", pages[url][0])
             except FetchError as exc:
                 pages[url] = ("", "")
-                print(f"::error::{url}: fetch failed ({exc})", flush=True)
+                print(f"::error::{url}: fetch failed ({redact(str(exc))})", flush=True)
         page, strategy = pages[url]
         if not page:
             failures.append(f"{name}: fetch failed")

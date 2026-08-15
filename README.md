@@ -4,9 +4,9 @@ A free GitHub Actions workflow that checks four Decathlon CZ/SK pillow listings 
 day and opens a GitHub issue — which GitHub emails to you — whenever one of them gets
 cheaper.
 
-Prices are read from **Heureka** search results, not from Decathlon directly: both
-Decathlon shops sit behind a Cloudflare challenge that an unattended runner cannot
-clear. See *Why Heureka* below.
+Prices are read from **Heureka** search results through a scraping service, because both
+Decathlon and Heureka block GitHub's runners at the Cloudflare layer. See *Why a scraping
+service* below — it needs one repository secret.
 
 ## Watched items
 
@@ -19,11 +19,13 @@ clear. See *Why Heureka* below.
 
 ## Setup
 
-There are no secrets to configure. Two one-time steps:
+Three one-time steps:
 
-1. **Allow the workflow to open issues and push.**
+1. **Add your scraping-service API key** as the repository secret `SCRAPER_API_KEY`
+   (Settings → Secrets and variables → Actions). See *Why a scraping service*.
+2. **Allow the workflow to open issues and push.**
    Settings → Actions → General → *Workflow permissions* → **Read and write permissions**.
-2. **Make sure you get the email.**
+3. **Make sure you get the email.**
    Watch this repository (**Watch → All Activity**, or at minimum *Issues*) and check that
    Settings → Notifications → *Email* is enabled for your account. Every alert issue is
    also assigned to you, which notifies you regardless of watch settings.
@@ -41,59 +43,76 @@ run records a baseline and will not alert. Every later run compares against it.
 Once an alert fires, the new lower price becomes the baseline, so you get one issue per
 drop rather than a daily repeat. Price increases are recorded silently.
 
-## Why Heureka
+## Why a scraping service
 
-Decathlon's own product pages are served through **Cloudflare**, which returns a managed
-challenge (`Just a moment…` / `Okamžik…` / `Len chvíľu…`) instead of the page. Three
-clients were tried and all were blocked from GitHub's runners: plain HTTP and curl get a
-`403`, and a real browser driven by Playwright still sat on an unsolved interactive
-challenge. That is an IP-reputation decision by Cloudflare, so no client-side change
-fixes it.
+Both Decathlon shops **and Heureka** are Cloudflare customers, and Cloudflare challenges
+GitHub's datacenter IP ranges. Everything client-side was tried and blocked:
 
-**Heureka turned out to be behind Cloudflare too**, and is challenged from GitHub
-runners exactly like Decathlon is. The blocker is not any one site: Cloudflare judges
-GitHub's datacenter IP ranges, and both shops are its customers.
+| Client | Result |
+| --- | --- |
+| urllib with full Chrome headers | `403` |
+| curl with HTTP/2 | `403` |
+| Playwright driving real Chrome | unsolved interactive challenge |
+| headless Chrome `--dump-dom` | unsolved interactive challenge |
 
-Run the **Probe price sources** workflow (Actions → *Probe price sources* → Run workflow)
-to see which candidates are reachable from a runner. It tests reader proxies and other
-comparison sites in one run and prints a summary table, so the source can be chosen from
-evidence instead of one failed run at a time.
+This is an IP-reputation decision, so no client-side change fixes it. Note that Scrapy
+would not help either: it is a scraping *framework* that runs on your own machine, so it
+would come from the same blocked IP.
 
-Once a working source is known, pointing the watchdog at it is a config change in
-`items.json` — no code change. Each item names a search page plus the matching row in
-the results:
+What works is a service that fetches the page **from its own residential IPs**. Set the
+repository secret `SCRAPER_API_KEY` (Settings → Secrets and variables → Actions), and the
+workflow passes it through. Ready-made templates for `proxy_template` in `items.json`:
 
-```json
-{
-  "id": "cz-ultim-comfort-xl",
-  "search_url": "https://www.heureka.cz/?h%5Bfraze%5D=ultim+comfort+polstar",
-  "product_url": "https://www.decathlon.cz/p/polstar-ultim-comfort-xl/_/R-p-348187",
-  "match_all": ["ultim comfort", "xl"],
-  "match_none": [],
-  "proxy_template": "https://r.jina.ai/{url}"
-}
-```
+| Service | `proxy_template` |
+| --- | --- |
+| ScraperAPI | `https://api.scraperapi.com/?api_key={key}&url={url_encoded}&render=true` |
+| ScrapingBee | `https://app.scrapingbee.com/api/v1/?api_key={key}&url={url_encoded}&render_js=true&premium_proxy=true` |
+| ScrapingAnt | `https://api.scrapingant.com/v2/general?url={url_encoded}&x-api-key={key}` |
+| ZenRows | `https://api.zenrows.com/v1/?apikey={key}&url={url_encoded}&js_render=true&premium_proxy=true` |
 
-`proxy_template` is optional. When set, the page is fetched through that reader proxy,
-so the origin sees the proxy's IP rather than the runner's — which is the thing
-Cloudflare is actually judging. Plain-text and markdown responses are parsed as well as
-HTML, so a reader proxy works as a drop-in source.
+`{url}`, `{url_encoded}` and `{key}` are substituted; `proxy_key_env` overrides which
+environment variable holds the key. The key is redacted from every log line, error
+message and uploaded debug file, and debug filenames are derived from the plain URL so a
+key cannot leak through a filename.
 
-`match_all` and `match_none` together pin the right result. They matter because
-*Ultim Comfort* is a substring of *Ultim Comfort XL* — without `match_none: ["xl"]` the
-non-XL item would happily match the XL row. Matching folds diacritics, so `polstar`
-matches `Polštář`, and short tokens like `xl` match whole words only.
+### Watch your credit budget
 
-Two caveats worth knowing:
+Free tiers are typically around 1,000 credits a month, and a Cloudflare-protected site
+normally needs the premium/JS-rendering mode, which costs several credits per request
+rather than one. Exact costs vary by provider and change over time, so check your
+dashboard after the first few runs.
+
+The default configuration is chosen to be frugal: it reads the **two Heureka search
+pages** (one CZ, one SK), each covering two products, so one run costs 2 requests —
+roughly 60 a month. Watching the four Decathlon pages directly would double that. If
+credits still run short, drop the schedule to every other day (`0 5 */2 * *`).
+
+Two caveats about reading from Heureka:
 
 - **Heureka shows the cheapest offer across all shops**, which need not be Decathlon's.
   For these Decathlon own-brand pillows Decathlon is normally the only seller, but the
-  alert says where the price came from so you can confirm before buying.
+  alert names its source so you can confirm before buying.
 - The alert still links to the **Decathlon** product page, since that is where you buy.
 
-The fetch chain (urllib → curl → Playwright → headless Chrome) is unchanged and still
-detects challenge pages, so if Heureka ever starts challenging too, the run fails loudly
-rather than inventing a price.
+To read Decathlon directly instead, give each item a `url` (the product page) instead of
+`search_url`/`match_all`/`match_none`, plus `skus`; that extractor is still present and
+tested.
+
+### Choosing the right listing row
+
+`match_all` and `match_none` pin the right search result. They matter because *Ultim
+Comfort* is a substring of *Ultim Comfort XL* — without `match_none: ["xl"]` the non-XL
+item would happily match the XL row. Matching folds diacritics, so `polstar` matches
+`Polštář`, and short tokens like `xl` match whole words only.
+
+The fetch chain still detects challenge pages, so if the service ever returns one, the
+run fails loudly rather than inventing a price.
+
+### Probing alternatives
+
+`Actions → Probe price sources → Run workflow` tests reader proxies and other CZ/SK
+comparison sites from a runner and prints which are reachable. Use it if you would rather
+find a free source than spend credits.
 
 ## If a check breaks
 
@@ -129,14 +148,19 @@ python3 scripts/check_prices.py --save-html debug   # keep the fetched HTML to i
 
 ## Adding items
 
-Append to `items.json` using the shape shown under *Why Heureka*. Give every item a
+Append to `items.json` using the shape of the existing entries. Give every item a
 unique `id` — it keys the stored price, so changing it resets that item's baseline.
 
 Check the log after adding one: it prints the listing row each price was matched from.
 
 ## Cost
 
-Free. One run a day, well under a minute. The only dependency is Playwright, kept as a
-fallback fetch strategy; extraction itself is standard library only.
-Public repositories get unlimited Actions minutes; private ones bill this at roughly a
-minute a month against the free tier.
+GitHub Actions itself stays free: one run a day, well under a minute. Public repositories
+get unlimited minutes; private ones bill this at roughly a minute a month against the
+free tier.
+
+The scraping service is the only thing that meters usage — see *Watch your credit
+budget*. If you would rather spend nothing at all, run the same workflow on a
+[self-hosted runner](https://docs.github.com/en/actions/hosting-your-own-runners) on your
+own machine: a residential IP is not challenged, so no service is needed. The trade-off
+is that checks only happen while that machine is on.

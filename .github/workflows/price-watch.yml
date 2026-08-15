@@ -42,6 +42,9 @@ jobs:
 
       - name: Check prices
         id: check
+        env:
+          # Only needed while items.json routes through a scraping service.
+          SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
         run: python scripts/check_prices.py --save-html debug
 
       - name: Open an issue about the price drop

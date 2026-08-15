@@ -4,39 +4,57 @@
     "name": "Polštář Ultim Comfort XL (CZ)",
     "search_url": "https://www.heureka.cz/?h%5Bfraze%5D=ultim+comfort+polstar",
     "product_url": "https://www.decathlon.cz/p/polstar-ultim-comfort-xl/_/R-p-348187",
-    "match_all": ["ultim comfort", "xl"],
+    "match_all": [
+      "ultim comfort",
+      "xl"
+    ],
     "match_none": [],
     "accept_language": "cs-CZ,cs;q=0.9,en;q=0.6",
-    "expect_currency": "CZK"
+    "expect_currency": "CZK",
+    "proxy_template": "https://api.scraperapi.com/?api_key={key}&url={url_encoded}&render=true"
   },
   {
     "id": "cz-ultim-comfort",
     "name": "Polštář Ultim Comfort (CZ)",
     "search_url": "https://www.heureka.cz/?h%5Bfraze%5D=ultim+comfort+polstar",
     "product_url": "https://www.decathlon.cz/p/polstar-ultim-comfort/_/R-p-308736",
-    "match_all": ["ultim comfort"],
-    "match_none": ["xl"],
+    "match_all": [
+      "ultim comfort"
+    ],
+    "match_none": [
+      "xl"
+    ],
     "accept_language": "cs-CZ,cs;q=0.9,en;q=0.6",
-    "expect_currency": "CZK"
+    "expect_currency": "CZK",
+    "proxy_template": "https://api.scraperapi.com/?api_key={key}&url={url_encoded}&render=true"
   },
   {
     "id": "sk-ultim-comfort-xl",
     "name": "Kempingový vankúš XL Ultim Comfort (SK)",
     "search_url": "https://www.heureka.sk/?h%5Bfraze%5D=ultim+comfort+vankus",
     "product_url": "https://www.decathlon.sk/p/348187-368243-kempingovy-vankus-xl-ultim-comfort.html",
-    "match_all": ["ultim comfort", "xl"],
+    "match_all": [
+      "ultim comfort",
+      "xl"
+    ],
     "match_none": [],
     "accept_language": "sk-SK,sk;q=0.9,cs;q=0.7,en;q=0.5",
-    "expect_currency": "EUR"
+    "expect_currency": "EUR",
+    "proxy_template": "https://api.scraperapi.com/?api_key={key}&url={url_encoded}&render=true"
   },
   {
     "id": "sk-ultim-comfort",
     "name": "Kempingový vankúš Ultim Comfort (SK)",
     "search_url": "https://www.heureka.sk/?h%5Bfraze%5D=ultim+comfort+vankus",
     "product_url": "https://www.decathlon.sk/p/308736-333552-kempingovy-vankus-ultim-comfort.html",
-    "match_all": ["ultim comfort"],
-    "match_none": ["xl"],
+    "match_all": [
+      "ultim comfort"
+    ],
+    "match_none": [
+      "xl"
+    ],
     "accept_language": "sk-SK,sk;q=0.9,cs;q=0.7,en;q=0.5",
-    "expect_currency": "EUR"
+    "expect_currency": "EUR",
+    "proxy_template": "https://api.scraperapi.com/?api_key={key}&url={url_encoded}&render=true"
   }
 ]

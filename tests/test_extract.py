@@ -2,6 +2,7 @@
 """Offline checks for the price extractor, run in CI and locally without network."""
 
 import json
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -12,6 +13,7 @@ import check_prices  # noqa: E402
 from check_prices import (  # noqa: E402
     FetchError,
     ParseError,
+    build_fetch_url,
     extract_from_listing,
     extract_price,
     fold,
@@ -19,6 +21,7 @@ from check_prices import (  # noqa: E402
     fetch,
     looks_blocked,
     money,
+    redact,
     to_number,
 )
 
@@ -301,3 +304,48 @@ od 249 K\u010d
     def test_markdown_respects_match_none(self):
         item = {"match_all": ["ultim comfort"], "match_none": ["xl"], "expect_currency": "CZK"}
         self.assertEqual(extract_from_listing(self.MARKDOWN, item)["price"], 249.0)
+
+
+class ProxyTemplateTests(unittest.TestCase):
+    """A scraping service is wired in by config; its key must never leak."""
+
+    URL = "https://www.heureka.cz/?h%5Bfraze%5D=ultim+comfort"
+
+    def setUp(self):
+        check_prices._SECRETS.clear()
+        self.addCleanup(check_prices._SECRETS.clear)
+        os.environ.pop("SCRAPER_API_KEY", None)
+        self.addCleanup(lambda: os.environ.pop("SCRAPER_API_KEY", None))
+
+    def test_no_template_returns_url_unchanged(self):
+        self.assertEqual(build_fetch_url({}, self.URL), self.URL)
+
+    def test_key_and_encoded_url_are_substituted(self):
+        os.environ["SCRAPER_API_KEY"] = "secret123"
+        item = {"proxy_template": "https://api.example.com/?api_key={key}&url={url_encoded}"}
+        built = build_fetch_url(item, self.URL)
+        self.assertIn("api_key=secret123", built)
+        self.assertIn("https%3A%2F%2Fwww.heureka.cz", built)
+        self.assertNotIn("?h%5Bfraze", built.split("url=")[1])  # fully encoded, not raw
+
+    def test_missing_key_fails_loudly(self):
+        item = {"proxy_template": "https://api.example.com/?api_key={key}&url={url_encoded}"}
+        with self.assertRaises(FetchError) as caught:
+            build_fetch_url(item, self.URL)
+        self.assertIn("SCRAPER_API_KEY", str(caught.exception))
+
+    def test_custom_key_env(self):
+        os.environ["MY_KEY"] = "abc"
+        self.addCleanup(lambda: os.environ.pop("MY_KEY", None))
+        item = {"proxy_template": "https://x/?k={key}", "proxy_key_env": "MY_KEY"}
+        self.assertEqual(build_fetch_url(item, self.URL), "https://x/?k=abc")
+
+    def test_key_is_redacted_from_text(self):
+        os.environ["SCRAPER_API_KEY"] = "supersecret"
+        build_fetch_url({"proxy_template": "https://x/?k={key}"}, self.URL)
+        self.assertNotIn("supersecret", redact("error calling https://x/?k=supersecret"))
+        self.assertIn("***REDACTED***", redact("k=supersecret"))
+
+    def test_keyless_template_needs_no_secret(self):
+        item = {"proxy_template": "https://r.jina.ai/{url}"}
+        self.assertEqual(build_fetch_url(item, self.URL), f"https://r.jina.ai/{self.URL}")
