@@ -136,18 +136,22 @@ what identifies the blocker — open it and the bot manager usually names itself
 
 From a Decathlon product page, in order of reliability:
 
-1. `schema.org` **JSON-LD** `Product.offers.price`, filtered to the offer whose product
-   blob mentions the item's SKU — so a recommended-product carousel on the same page
-   cannot be mistaken for the pillow you are watching.
+1. `schema.org` **JSON-LD**, filtered to the offer whose product blob mentions the
+   item's SKU — so a bundle or recommended-product carousel on the same page cannot be
+   mistaken for the pillow you are watching. Note that Decathlon nests the figure at
+   `offers.priceSpecification.price` rather than `offers.price`, so extraction walks
+   into the offer rather than reading one flat key; `tests/fixtures/` holds markup
+   captured from the live page to keep that honest.
 2. Embedded JSON (`__NEXT_DATA__` and other JSON blocks) carrying both a price-like and a
    currency-like key.
 3. `product:price:amount` / `og:price:amount` meta tags.
 4. Visible page text with a `Kč` or `€` symbol, as a last resort.
 
 Every candidate is bounds-checked per currency, so a `0`, a free-shipping threshold or a
-stray banner figure cannot become your baseline. The log records which source each price
-came from, so a silent change in the page structure shows up as a changed source rather
-than a wrong number.
+stray banner figure cannot become your baseline — the real CZ page carries a 2 000 Kč
+free-shipping line and 149/249 Kč bundle items, and the fixture test asserts none of them
+win. The log records which source each price came from, so a silent change in the page
+structure shows up as a changed source rather than a wrong number.
 
 A listing extractor for comparison-site search pages also exists and is tested; see
 *Reading Decathlon directly*.

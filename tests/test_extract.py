@@ -4,6 +4,7 @@
 import json
 import os
 import pathlib
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -430,3 +431,42 @@ class ShippedConfigTests(unittest.TestCase):
         for item in shipped_items():
             expected = "CZK" if ".cz/" in item["url"] else "EUR"
             self.assertEqual(item["expect_currency"], expected, item["id"])
+
+
+class RealDecathlonPageTests(unittest.TestCase):
+    """Against markup captured from the live CZ product page.
+
+    The price sits at offers.priceSpecification.price, not offers.price — a
+    naive `offers["price"]` lookup finds nothing here and falls through to
+    guessing from page text.
+    """
+
+    def setUp(self):
+        fixture = pathlib.Path(__file__).resolve().parent / "fixtures" / "decathlon_cz_308736.html"
+        self.page = fixture.read_text(encoding="utf-8")
+        self.item = next(i for i in shipped_items() if i["id"] == "cz-ultim-comfort")
+
+    def test_extracts_the_real_price(self):
+        result = extract_price(self.page, self.item)
+        self.assertEqual(result["price"], 499.0)
+        self.assertEqual(result["currency"], "CZK")
+        self.assertTrue(result["method"].startswith("ld+json"))
+
+    def test_price_is_nested_under_price_specification(self):
+        """Guards the recursion into offers; a flat lookup would miss it."""
+        offers = json.loads(
+            re.search(
+                r'<script type="application/ld\+json">(.*?)</script>', self.page, re.DOTALL
+            ).group(1)
+        )["@graph"][1]["offers"]
+        self.assertNotIn("price", offers)
+        self.assertEqual(offers["priceSpecification"]["price"], 499)
+
+    def test_bundle_and_shipping_prices_are_not_picked_up(self):
+        """The page also shows 149/249 Kč bundle items and a 2 000 Kč threshold."""
+        result = extract_price(self.page, self.item)
+        self.assertEqual(result["candidate_count"], 1)
+        self.assertNotIn(result["price"], (149.0, 249.0, 2000.0))
+
+    def test_real_page_is_not_flagged_as_blocked(self):
+        self.assertIsNone(looks_blocked(self.page))
