@@ -114,6 +114,41 @@ class BlockDetectionTests(unittest.TestCase):
         self.assertIsNone(looks_blocked("<html>" + "product copy " * 500 + "</html>"))
 
 
+class CloudflareDetectionTests(unittest.TestCase):
+    """Regression: the localised interstitial was passing as a successful fetch."""
+
+    def cf_page(self, title):
+        return (
+            f"<html><head><title>{title}</title></head><body>"
+            "<div id=\"challenge-running\"></div>" + "padding " * 500 + "</body></html>"
+        )
+
+    def test_czech_interstitial_is_blocked(self):
+        self.assertIsNotNone(looks_blocked(self.cf_page("Okam\u017eik\u2026")))
+
+    def test_slovak_interstitial_is_blocked(self):
+        self.assertIsNotNone(looks_blocked(self.cf_page("Len chv\u00ed\u013eu...")))
+
+    def test_english_interstitial_is_blocked(self):
+        self.assertIsNotNone(looks_blocked(self.cf_page("Just a moment...")))
+
+    def test_challenge_platform_script_is_blocked(self):
+        body = "<html><head><title>Pol\u0161t\u00e1\u0159</title></head><body>"
+        body += '<script src="/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1"></script>'
+        body += "padding " * 500 + "</body></html>"
+        self.assertIn("challenge-platform", looks_blocked(body))
+
+    def test_real_page_mentioning_turnstile_is_not_blocked(self):
+        """A login widget reference must not be mistaken for an interstitial."""
+        body = (
+            "<html><head><title>Pol\u0161t\u00e1\u0159 Ultim Comfort XL</title></head><body>"
+            '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js"></script>'
+            + "product copy " * 500
+            + "</body></html>"
+        )
+        self.assertIsNone(looks_blocked(body))
+
+
 class FetchFallbackTests(unittest.TestCase):
     """The whole point of the chain: a 403 on one client must try the next."""
 

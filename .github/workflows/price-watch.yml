@@ -35,6 +35,11 @@ jobs:
           done
           command -v google-chrome >/dev/null 2>&1 || echo "::warning::no Google Chrome on this runner"
 
+      # Cloudflare's interstitial has to be waited out in a real browser. Playwright
+      # drives the runner's preinstalled Chrome, so no browser download is needed.
+      - name: Install Playwright
+        run: pip install --disable-pip-version-check playwright==1.47.0
+
       - name: Check prices
         id: check
         run: python scripts/check_prices.py --save-html debug

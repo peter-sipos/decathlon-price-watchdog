@@ -39,18 +39,23 @@ drop rather than a daily repeat. Price increases are recorded silently.
 
 ## Getting past the bot protection
 
-Decathlon fronts both shops with a bot manager that fingerprints the TLS and HTTP/2
-handshake, not just the request headers — a plain Python request gets `403 Forbidden`.
-The script therefore escalates through three clients and uses the first that returns a
-real product page:
+Both shops sit behind **Cloudflare**, which serves a managed challenge (`Just a moment…`
+/ `Okamžik…` / `Len chvíľu…`) instead of the product page. The script escalates through
+four clients and uses the first that returns a real product page:
 
-1. **urllib** with a full Chrome header set — free and instant when it works.
-2. **curl** with HTTP/2 — a different TLS fingerprint, sometimes enough on its own.
-3. **headless Chrome** (`--dump-dom`, preinstalled on GitHub runners) — a genuine browser
-   fingerprint, and it runs the page's JavaScript.
+1. **urllib** with a full Chrome header set — instant when it works; currently gets 403.
+2. **curl** with HTTP/2 — a different TLS fingerprint; currently gets 403.
+3. **Playwright** driving the runner's Chrome — loads the page and *waits* for the
+   interstitial to clear, polling until the challenge markers disappear.
+4. **headless Chrome** `--dump-dom` — a dependency-free fallback for local runs.
 
-A response that is short or contains a bot-check marker counts as a failure, not a
-success, so a challenge page can never be mistaken for a product page.
+Steps 1 and 2 fail against a challenge by design; step 3 is the one that has to work.
+
+A response is only treated as success if it is not a challenge page. Detection keys on
+locale-independent markers (`/cdn-cgi/challenge-platform`, `_cf_chl`) plus known
+interstitial titles in English, Czech and Slovak — matching English text alone let a
+localised challenge masquerade as a real page. A page merely *referencing* Turnstile for
+a login widget is not treated as blocked.
 
 ## If a check breaks
 

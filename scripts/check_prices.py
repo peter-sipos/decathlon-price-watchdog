@@ -54,6 +54,9 @@ CURRENCY_SYMBOLS = {"Kč": "CZK", "€": "EUR"}
 # Non-breaking space, used as the thousands separator in CZ/SK price formatting.
 NBSP = "\u00a0"
 
+# How long to let a browser sit on a Cloudflare interstitial before giving up.
+CHALLENGE_WAIT_SECONDS = 45
+
 MIN_PLAUSIBLE = {"CZK": 20.0, "EUR": 1.0}
 MAX_PLAUSIBLE = {"CZK": 100000.0, "EUR": 4000.0}
 
@@ -77,17 +80,34 @@ class ParseError(Exception):
 # 403, so we escalate through progressively more browser-like clients and use the
 # first one that returns a real product page.
 
+# Markers that only ever appear on an interception page. Bare "turnstile" or
+# "challenges.cloudflare.com" are deliberately absent: a genuine page may reference
+# them for a login widget, and a false "blocked" would be as bad as a false "ok".
 BLOCK_MARKERS = (
-    "access denied",
-    "reference #",
-    "pardon our interruption",
-    "request unsuccessful",
-    "you have been blocked",
-    "attention required!",
-    "unusual traffic",
+    "/cdn-cgi/challenge-platform",
+    "_cf_chl",
+    "cf_chl_opt",
     "px-captcha",
     "/_sec/cp_challenge",
     "distil_r_captcha",
+    "you have been blocked",
+    "enable javascript and cookies",
+    "pardon our interruption",
+    "request unsuccessful",
+    "access denied",
+    "reference #",
+)
+
+# Cloudflare localises its interstitial, so the English title alone is not enough:
+# the CZ shop returns "Okamžik…" and the SK shop "Len chvíľu…".
+BLOCK_TITLES = (
+    "just a moment",
+    "okamžik",
+    "len chvíľu",
+    "access denied",
+    "attention required",
+    "unusual traffic",
+    "security check",
 )
 
 
@@ -115,14 +135,23 @@ def browser_headers(accept_language: str, url: str) -> dict[str, str]:
     }
 
 
+def page_title(text: str) -> str:
+    match = re.search(r"<title[^>]*>(.*?)</title>", text, re.DOTALL | re.IGNORECASE)
+    return html.unescape(match.group(1)).strip().lower() if match else ""
+
+
 def looks_blocked(text: str) -> str | None:
     """Return a reason if the response is a bot-check page rather than the product."""
     if len(text) < 2000:
         return f"suspiciously short response ({len(text)} bytes)"
-    lowered_text = text[:20000].lower()
+    lowered_text = text[:40000].lower()
     for marker in BLOCK_MARKERS:
         if marker in lowered_text:
             return f"bot-check marker {marker!r} in response"
+    title = page_title(text)
+    for marker in BLOCK_TITLES:
+        if marker in title:
+            return f"bot-check page title {title!r}"
     return None
 
 
@@ -217,7 +246,7 @@ def fetch_chrome(url: str, accept_language: str, timeout: int) -> str:
             f"--lang={accept_language.split(',')[0]}",
             f"--accept-lang={accept_language}",
             f"--user-agent={USER_AGENT}",
-            "--virtual-time-budget=25000",
+            "--virtual-time-budget=15000",
             "--dump-dom",
             url,
         ]
@@ -233,9 +262,69 @@ def fetch_chrome(url: str, accept_language: str, timeout: int) -> str:
     return result.stdout
 
 
+def fetch_playwright(url: str, accept_language: str, timeout: int) -> str:
+    """Drive a real browser and wait for Cloudflare's interstitial to resolve.
+
+    ``fetch_chrome`` only snapshots the DOM once, which captures the challenge page
+    rather than the product; the challenge needs real wall-clock time and network
+    round trips to clear. This keeps polling until the markers disappear.
+    """
+    try:
+        from playwright.sync_api import Error as PlaywrightError
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise FetchError("playwright is not installed") from exc
+
+    locale = accept_language.split(",")[0]
+    args = [
+        "--disable-blink-features=AutomationControlled",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+    ]
+    last_content = ""
+    try:
+        with sync_playwright() as engine:
+            browser = None
+            for channel in ("chrome", None):
+                try:
+                    browser = engine.chromium.launch(headless=True, channel=channel, args=args)
+                    break
+                except PlaywrightError:
+                    continue
+            if browser is None:
+                raise FetchError("could not launch Chrome or bundled Chromium")
+            try:
+                context = browser.new_context(
+                    user_agent=USER_AGENT,
+                    locale=locale,
+                    timezone_id="Europe/Prague",
+                    viewport={"width": 1440, "height": 900},
+                    extra_http_headers={"Accept-Language": accept_language},
+                )
+                # A headless browser advertises itself via navigator.webdriver.
+                context.add_init_script(
+                    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+                )
+                page = context.new_page()
+                page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
+                deadline = time.monotonic() + CHALLENGE_WAIT_SECONDS
+                last_content = page.content()
+                while looks_blocked(last_content) and time.monotonic() < deadline:
+                    page.wait_for_timeout(2000)
+                    last_content = page.content()
+            finally:
+                browser.close()
+    except FetchError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - any driver failure is just a failed fetch
+        raise FetchError(f"playwright: {type(exc).__name__}: {exc}", last_content) from exc
+    return last_content
+
+
 FETCH_STRATEGIES = (
     ("urllib", fetch_urllib),
     ("curl", fetch_curl),
+    ("playwright", fetch_playwright),
     ("chrome", fetch_chrome),
 )
 
