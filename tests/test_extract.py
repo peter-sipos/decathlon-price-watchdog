@@ -31,6 +31,11 @@ CZ_ITEM = {"url": "https://www.decathlon.cz/p/x/_/R-p-348187", "skus": ["348187"
 SK_ITEM = {"url": "https://www.decathlon.sk/p/348187-368243-x.html", "skus": ["348187"], "expect_currency": "EUR"}
 
 
+def shipped_items():
+    root = pathlib.Path(__file__).resolve().parent.parent
+    return json.loads((root / "items.json").read_text("utf-8"))
+
+
 def page(*blocks: str) -> str:
     return "<html><head>" + "".join(blocks) + "</head><body></body></html>"
 
@@ -390,11 +395,38 @@ class ProxyEscalationTests(unittest.TestCase):
 
     def test_configured_ladder_is_cheapest_first(self):
         """The shipped config must not pay for rendering before trying without."""
-        items = json.loads(
-            (pathlib.Path(__file__).resolve().parent.parent / "items.json").read_text("utf-8")
-        )
-        for item in items:
+        for item in shipped_items():
             ladder = item["proxy_templates"]
             self.assertNotIn("render=true", ladder[0], item["id"])
             self.assertNotIn("ultra_premium", ladder[0], item["id"])
             self.assertIn("render=true", ladder[1], item["id"])
+
+
+class ShippedConfigTests(unittest.TestCase):
+    """Guard the config itself: a typo here silently watches the wrong thing."""
+
+    def test_every_item_has_a_unique_id(self):
+        ids = [item["id"] for item in shipped_items()]
+        self.assertEqual(len(ids), len(set(ids)))
+
+    def test_all_four_products_are_watched(self):
+        urls = {item["url"] for item in shipped_items()}
+        self.assertEqual(len(urls), 4)
+        for fragment in ("348187", "308736"):
+            self.assertTrue(
+                any(fragment in url for url in urls), f"{fragment} is not watched"
+            )
+
+    def test_each_item_targets_its_own_sku(self):
+        """Both shops list the XL and non-XL pillow; the SKU keeps them apart."""
+        for item in shipped_items():
+            self.assertTrue(item["skus"], item["id"])
+            self.assertTrue(
+                any(sku in item["url"] for sku in item["skus"]),
+                f"{item['id']}: no SKU appears in its own URL",
+            )
+
+    def test_currency_matches_the_shop(self):
+        for item in shipped_items():
+            expected = "CZK" if ".cz/" in item["url"] else "EUR"
+            self.assertEqual(item["expect_currency"], expected, item["id"])

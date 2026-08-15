@@ -4,9 +4,9 @@ A free GitHub Actions workflow that checks four Decathlon CZ/SK pillow listings 
 day and opens a GitHub issue — which GitHub emails to you — whenever one of them gets
 cheaper.
 
-Prices are read from **Heureka** search results through a scraping service, because both
-Decathlon and Heureka block GitHub's runners at the Cloudflare layer. See *Why a scraping
-service* below — it needs one repository secret.
+Prices come straight from the Decathlon product pages, fetched through a scraping
+service because Decathlon blocks GitHub's runners at the Cloudflare layer. See *Why a
+scraping service* below — it needs one repository secret.
 
 ## Watched items
 
@@ -75,6 +75,16 @@ environment variable holds the key. The key is redacted from every log line, err
 message and uploaded debug file, and debug filenames derive from the plain URL, so a key
 cannot leak through a filename either.
 
+### Reading Decathlon directly
+
+The scraping service reaches Decathlon's own product pages on its cheapest tier, so the
+watchdog reads the real Decathlon price rather than a comparison site's cheapest-across-
+shops figure. That costs 4 requests per run, one per product.
+
+An earlier version read two Heureka search pages instead, to halve the request count
+while Decathlon looked unreachable. That code is still present and tested: give an item
+`search_url` plus `match_all`/`match_none` instead of `url`/`skus` to use it.
+
 ### Paying the cheap tier first
 
 `proxy_templates` is a list tried **cheapest first**, stopping at the first tier that
@@ -97,31 +107,11 @@ credits per request rather than one. Exact costs vary by provider and change ove
 so check your dashboard after the first few runs — treat the numbers below as arithmetic
 to redo against your own plan, not as quoted prices.
 
-The default configuration is deliberately frugal: it reads the **two Heureka search
-pages** (one CZ, one SK), each covering two products, so a run costs 2 requests — roughly
-60 a month. Watching the four Decathlon pages directly would double that.
-
-At 2 requests a day on the cheapest tier that is comfortable. If every request has to
-escalate to the most expensive tier, a daily schedule can exceed a 1,000-credit
-allowance; drop the schedule to every other day (`0 5 */2 * *`) if so.
-
-Two caveats about reading from Heureka:
-
-- **Heureka shows the cheapest offer across all shops**, which need not be Decathlon's.
-  For these Decathlon own-brand pillows Decathlon is normally the only seller, but the
-  alert names its source so you can confirm before buying.
-- The alert still links to the **Decathlon** product page, since that is where you buy.
-
-To read Decathlon directly instead, give each item a `url` (the product page) instead of
-`search_url`/`match_all`/`match_none`, plus `skus`; that extractor is still present and
-tested.
-
-### Choosing the right listing row
-
-`match_all` and `match_none` pin the right search result. They matter because *Ultim
-Comfort* is a substring of *Ultim Comfort XL* — without `match_none: ["xl"]` the non-XL
-item would happily match the XL row. Matching folds diacritics, so `polstar` matches
-`Polštář`, and short tokens like `xl` match whole words only.
+One run costs **4 requests**, one per product — roughly 120 a month, which the cheapest
+tier handles comfortably inside a typical 1,000-credit allowance. If requests start
+escalating to the most expensive tier, a daily schedule could exceed it; switch to every
+other day (`0 5 */2 * *`), or read the two Heureka search pages instead to halve the
+count.
 
 The fetch chain still detects challenge pages, so if the service ever returns one, the
 run fails loudly rather than inventing a price.
@@ -144,17 +134,23 @@ what identifies the blocker — open it and the bot manager usually names itself
 
 ## Price extraction
 
-For a Heureka listing, in order of reliability:
+From a Decathlon product page, in order of reliability:
 
-1. **JSON-LD / embedded JSON** — any object whose `name` matches the item and that
-   carries a price. Preferred, because the pairing is explicit.
-2. **Visible text** — find the product name among the page's text nodes, then take the
-   first price within the following 25 nodes, which is the same card.
+1. `schema.org` **JSON-LD** `Product.offers.price`, filtered to the offer whose product
+   blob mentions the item's SKU — so a recommended-product carousel on the same page
+   cannot be mistaken for the pillow you are watching.
+2. Embedded JSON (`__NEXT_DATA__` and other JSON blocks) carrying both a price-like and a
+   currency-like key.
+3. `product:price:amount` / `og:price:amount` meta tags.
+4. Visible page text with a `Kč` or `€` symbol, as a last resort.
 
 Every candidate is bounds-checked per currency, so a `0`, a free-shipping threshold or a
-stray banner figure cannot become your baseline. When several rows match, the cheapest
-wins and the others are printed in the log. The run also prints and stores which listing
-row a price came from, so a mismatch is visible rather than silent.
+stray banner figure cannot become your baseline. The log records which source each price
+came from, so a silent change in the page structure shows up as a changed source rather
+than a wrong number.
+
+A listing extractor for comparison-site search pages also exists and is tested; see
+*Reading Decathlon directly*.
 
 ## Local use
 
