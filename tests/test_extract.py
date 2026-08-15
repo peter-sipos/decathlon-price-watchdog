@@ -8,7 +8,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from check_prices import extract_price, money, to_number  # noqa: E402
+import check_prices  # noqa: E402
+from check_prices import (  # noqa: E402
+    FetchError,
+    extract_price,
+    fetch,
+    looks_blocked,
+    money,
+    to_number,
+)
 
 CZ_ITEM = {"url": "https://www.decathlon.cz/p/x/_/R-p-348187", "skus": ["348187"], "expect_currency": "CZK"}
 SK_ITEM = {"url": "https://www.decathlon.sk/p/348187-368243-x.html", "skus": ["348187"], "expect_currency": "EUR"}
@@ -92,3 +100,56 @@ class MoneyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class BlockDetectionTests(unittest.TestCase):
+    def test_akamai_denial_is_detected(self):
+        body = "<html><body><h1>Access Denied</h1><p>Reference #18.abc</p></body></html>" + "x" * 3000
+        self.assertIn("access denied", looks_blocked(body))
+
+    def test_truncated_response_is_detected(self):
+        self.assertIn("suspiciously short", looks_blocked("<html>nope</html>"))
+
+    def test_real_product_page_passes(self):
+        self.assertIsNone(looks_blocked("<html>" + "product copy " * 500 + "</html>"))
+
+
+class FetchFallbackTests(unittest.TestCase):
+    """The whole point of the chain: a 403 on one client must try the next."""
+
+    def setUp(self):
+        self.calls = []
+        self._original = check_prices.FETCH_STRATEGIES
+        self.addCleanup(setattr, check_prices, "FETCH_STRATEGIES", self._original)
+
+    def install(self, *behaviours):
+        def make(name, behaviour):
+            def strategy(url, accept_language, timeout):
+                self.calls.append(name)
+                if isinstance(behaviour, Exception):
+                    raise behaviour
+                return behaviour
+            return (name, strategy)
+        check_prices.FETCH_STRATEGIES = tuple(make(n, b) for n, b in behaviours)
+
+    def test_falls_through_403_to_the_next_client(self):
+        good = "<html>" + "product " * 500 + "</html>"
+        self.install(("urllib", FetchError("HTTP 403", "<h1>Access Denied</h1>")), ("chrome", good))
+        text, strategy = fetch("https://example.test/p", "cs-CZ")
+        self.assertEqual(strategy, "chrome")
+        self.assertEqual(text, good)
+        self.assertEqual(self.calls, ["urllib", "chrome"])
+
+    def test_bot_check_body_counts_as_failure_not_success(self):
+        blocked = "<html><h1>Access Denied</h1>" + "x" * 3000 + "</html>"
+        good = "<html>" + "product " * 500 + "</html>"
+        self.install(("urllib", blocked), ("chrome", good))
+        _, strategy = fetch("https://example.test/p", "cs-CZ")
+        self.assertEqual(strategy, "chrome")
+
+    def test_reports_every_strategy_when_all_fail(self):
+        self.install(("urllib", FetchError("HTTP 403")), ("chrome", FetchError("no Chrome")))
+        with self.assertRaises(FetchError) as caught:
+            fetch("https://example.test/p", "cs-CZ")
+        self.assertIn("urllib: HTTP 403", str(caught.exception))
+        self.assertIn("chrome: no Chrome", str(caught.exception))

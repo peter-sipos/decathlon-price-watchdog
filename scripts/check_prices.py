@@ -17,7 +17,10 @@ import html
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -56,7 +59,11 @@ MAX_PLAUSIBLE = {"CZK": 100000.0, "EUR": 4000.0}
 
 
 class FetchError(Exception):
-    pass
+    """A fetch attempt failed. ``body`` holds the response for diagnostics."""
+
+    def __init__(self, message: str, body: str = "") -> None:
+        super().__init__(message)
+        self.body = body
 
 
 class ParseError(Exception):
@@ -65,38 +72,211 @@ class ParseError(Exception):
 
 # --------------------------------------------------------------------------- fetch
 
+# Decathlon fronts both shops with a bot manager that fingerprints the TLS and
+# HTTP/2 handshake, not just the headers. A plain Python request is rejected with
+# 403, so we escalate through progressively more browser-like clients and use the
+# first one that returns a real product page.
 
-def fetch(url: str, accept_language: str, timeout: int = 30, attempts: int = 3) -> str:
-    """Download a page, retrying transient failures with exponential backoff."""
-    last_error: Exception | None = None
-    for attempt in range(attempts):
-        if attempt:
-            time.sleep(2**attempt)
-        request = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": USER_AGENT,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": accept_language,
-                "Accept-Encoding": "gzip, deflate",
-                "Cache-Control": "no-cache",
-                "Pragma": "no-cache",
-                "Upgrade-Insecure-Requests": "1",
-            },
-        )
+BLOCK_MARKERS = (
+    "access denied",
+    "reference #",
+    "pardon our interruption",
+    "request unsuccessful",
+    "you have been blocked",
+    "attention required!",
+    "unusual traffic",
+    "px-captcha",
+    "/_sec/cp_challenge",
+    "distil_r_captcha",
+)
+
+
+def browser_headers(accept_language: str, url: str) -> dict[str, str]:
+    """The header set a real Chrome sends for a top-level navigation."""
+    origin = "/".join(url.split("/", 3)[:3])
+    return {
+        "User-Agent": USER_AGENT,
+        "Accept": (
+            "text/html,application/xhtml+xml,application/xml;q=0.9,"
+            "image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
+        ),
+        "Accept-Language": accept_language,
+        "Accept-Encoding": "gzip, deflate",
+        "sec-ch-ua": '"Chromium";v="126", "Google Chrome";v="126", "Not-A.Brand";v="99"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+        "Referer": origin + "/",
+        "Connection": "keep-alive",
+    }
+
+
+def looks_blocked(text: str) -> str | None:
+    """Return a reason if the response is a bot-check page rather than the product."""
+    if len(text) < 2000:
+        return f"suspiciously short response ({len(text)} bytes)"
+    lowered_text = text[:20000].lower()
+    for marker in BLOCK_MARKERS:
+        if marker in lowered_text:
+            return f"bot-check marker {marker!r} in response"
+    return None
+
+
+def _decode(raw: bytes, content_encoding: str, charset: str) -> str:
+    encoding = (content_encoding or "").lower()
+    if "gzip" in encoding:
+        raw = gzip.decompress(raw)
+    elif "deflate" in encoding:
+        raw = zlib.decompress(raw, -zlib.MAX_WBITS)
+    return raw.decode(charset or "utf-8", errors="replace")
+
+
+def fetch_urllib(url: str, accept_language: str, timeout: int) -> str:
+    request = urllib.request.Request(url, headers=browser_headers(accept_language, url))
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return _decode(
+                response.read(),
+                response.headers.get("Content-Encoding", ""),
+                response.headers.get_content_charset() or "utf-8",
+            )
+    except urllib.error.HTTPError as exc:
+        # The error body is the diagnostic: it says which bot manager rejected us.
+        body = ""
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                raw = response.read()
-                encoding = (response.headers.get("Content-Encoding") or "").lower()
-                if "gzip" in encoding:
-                    raw = gzip.decompress(raw)
-                elif "deflate" in encoding:
-                    raw = zlib.decompress(raw, -zlib.MAX_WBITS)
-                charset = response.headers.get_content_charset() or "utf-8"
-                return raw.decode(charset, errors="replace")
-        except (urllib.error.URLError, urllib.error.HTTPError, OSError, EOFError) as exc:
-            last_error = exc
-    raise FetchError(f"{type(last_error).__name__}: {last_error}")
+            body = _decode(exc.read(), exc.headers.get("Content-Encoding", ""), "utf-8")
+        except Exception:  # noqa: BLE001 - diagnostics must never mask the real error
+            pass
+        server = exc.headers.get("Server", "?") if exc.headers else "?"
+        raise FetchError(f"HTTP {exc.code} (server: {server})", body) from exc
+    except (urllib.error.URLError, OSError, EOFError) as exc:
+        raise FetchError(f"{type(exc).__name__}: {exc}") from exc
+
+
+def fetch_curl(url: str, accept_language: str, timeout: int) -> str:
+    """curl negotiates HTTP/2 with an OpenSSL fingerprint unlike Python's."""
+    if not shutil.which("curl"):
+        raise FetchError("curl is not installed")
+    command = ["curl", "-sS", "-L", "--http2", "--compressed", "--max-time", str(timeout)]
+    for key, value in browser_headers(accept_language, url).items():
+        if key != "Accept-Encoding":  # --compressed sets this itself
+            command += ["-H", f"{key}: {value}"]
+    command += ["-w", "\n__HTTP_STATUS__:%{http_code}", url]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout + 15)
+    except subprocess.TimeoutExpired as exc:
+        raise FetchError("curl timed out") from exc
+    body, _, status = result.stdout.rpartition("\n__HTTP_STATUS__:")
+    if result.returncode != 0:
+        raise FetchError(f"curl exited {result.returncode}: {result.stderr.strip()[:200]}", body)
+    if status.strip() != "200":
+        raise FetchError(f"HTTP {status.strip()}", body)
+    return body
+
+
+def find_chrome() -> str | None:
+    candidates = [os.environ.get("CHROME_BIN"), os.environ.get("CHROME_PATH")]
+    candidates += [
+        "google-chrome",
+        "google-chrome-stable",
+        "chromium",
+        "chromium-browser",
+    ]
+    for candidate in candidates:
+        if candidate and shutil.which(candidate):
+            return shutil.which(candidate)
+    playwright_root = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    if playwright_root:
+        for path in sorted(Path(playwright_root).glob("chromium*/chrome-linux/chrome")):
+            if path.is_file():
+                return str(path)
+    return None
+
+
+def fetch_chrome(url: str, accept_language: str, timeout: int) -> str:
+    """Real Chrome: correct TLS fingerprint, and it runs the page's JavaScript."""
+    chrome = find_chrome()
+    if not chrome:
+        raise FetchError("no Chrome/Chromium binary found")
+    with tempfile.TemporaryDirectory(prefix="price-watch-chrome-") as profile:
+        command = [
+            chrome,
+            "--headless=new",
+            "--disable-gpu",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-extensions",
+            "--disable-blink-features=AutomationControlled",
+            f"--user-data-dir={profile}",
+            f"--lang={accept_language.split(',')[0]}",
+            f"--accept-lang={accept_language}",
+            f"--user-agent={USER_AGENT}",
+            "--virtual-time-budget=25000",
+            "--dump-dom",
+            url,
+        ]
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=timeout + 45)
+        except subprocess.TimeoutExpired as exc:
+            raise FetchError("headless Chrome timed out") from exc
+    if result.returncode != 0:
+        raise FetchError(
+            f"headless Chrome exited {result.returncode}: {result.stderr.strip()[:200]}",
+            result.stdout,
+        )
+    return result.stdout
+
+
+FETCH_STRATEGIES = (
+    ("urllib", fetch_urllib),
+    ("curl", fetch_curl),
+    ("chrome", fetch_chrome),
+)
+
+
+def fetch(
+    url: str,
+    accept_language: str,
+    timeout: int = 30,
+    debug_dir: Path | None = None,
+    slug: str = "page",
+) -> tuple[str, str]:
+    """Try each client in turn; return (html, strategy_name) from the first that works.
+
+    Every failure — including the body of a bot-check page — is written to
+    ``debug_dir`` so a failed run explains itself in the uploaded artifact.
+    """
+    problems: list[str] = []
+    for name, strategy in FETCH_STRATEGIES:
+        for attempt in range(2):
+            if attempt:
+                time.sleep(3)
+            try:
+                text = strategy(url, accept_language, timeout)
+            except FetchError as exc:
+                problems.append(f"{name}: {exc}")
+                if debug_dir and exc.body:
+                    save_debug(debug_dir, f"{slug}.{name}.failed.html", exc.body)
+                break  # a rejection is not transient; move to the next strategy
+            blocked = looks_blocked(text)
+            if blocked:
+                problems.append(f"{name}: {blocked}")
+                if debug_dir:
+                    save_debug(debug_dir, f"{slug}.{name}.blocked.html", text)
+                break
+            return text, name
+    raise FetchError("; ".join(problems) or "all fetch strategies failed")
+
+
+def save_debug(debug_dir: Path, filename: str, content: str) -> None:
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    (debug_dir / filename).write_text(content, encoding="utf-8", errors="replace")
 
 
 # --------------------------------------------------------------------------- parsing helpers
@@ -465,27 +645,32 @@ def main() -> int:
     drops: list[dict] = []
     failures: list[str] = []
 
+    # Failure diagnostics are always collected; --save-html additionally keeps the
+    # HTML of successful fetches.
+    debug_dir = Path(args.save_html) if args.save_html else Path("debug")
+
     for item in items:
         url = item["url"]
         name = item.get("name", url)
+        slug = re.sub(r"[^a-zA-Z0-9]+", "-", url).strip("-")[-80:]
         try:
-            page = fetch(url, item.get("accept_language", "en;q=0.9"))
+            page, strategy = fetch(
+                url, item.get("accept_language", "en;q=0.9"), debug_dir=debug_dir, slug=slug
+            )
         except FetchError as exc:
             failures.append(f"{name}: fetch failed ({exc})")
             print(f"::error::{name}: fetch failed ({exc})", flush=True)
             continue
 
         if args.save_html:
-            debug_dir = Path(args.save_html)
-            debug_dir.mkdir(parents=True, exist_ok=True)
-            slug = re.sub(r"[^a-zA-Z0-9]+", "-", url)[-80:]
-            (debug_dir / f"{slug}.html").write_text(page, encoding="utf-8")
+            save_debug(debug_dir, f"{slug}.ok.html", page)
 
         try:
             result = extract_price(page, item)
         except ParseError as exc:
+            save_debug(debug_dir, f"{slug}.unparsed.html", page)
             failures.append(f"{name}: {exc}")
-            print(f"::error::{name}: {exc}", flush=True)
+            print(f"::error::{name}: {exc} (fetched via {strategy})", flush=True)
             continue
 
         price = result["price"]
@@ -517,7 +702,8 @@ def main() -> int:
         print(
             f"{name}: {money(price, currency)} "
             f"(previous: {money(previous_price, previous_currency) if previous_price else 'n/a'}, "
-            f"source: {result['method']}, candidates: {result['candidate_count']}){note}",
+            f"via: {strategy}, source: {result['method']}, "
+            f"candidates: {result['candidate_count']}){note}",
             flush=True,
         )
 

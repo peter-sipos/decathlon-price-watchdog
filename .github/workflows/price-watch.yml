@@ -24,6 +24,17 @@ jobs:
         with:
           python-version: "3.12"
 
+      # Decathlon's bot manager rejects plain HTTP clients, so the script falls back
+      # to headless Chrome. Record which browser the runner actually provides.
+      - name: Report available browser
+        run: |
+          for candidate in google-chrome google-chrome-stable chromium chromium-browser; do
+            if command -v "$candidate" >/dev/null 2>&1; then
+              echo "$candidate -> $("$candidate" --version 2>&1 | head -1)"
+            fi
+          done
+          command -v google-chrome >/dev/null 2>&1 || echo "::warning::no Google Chrome on this runner"
+
       - name: Check prices
         id: check
         run: python scripts/check_prices.py --save-html debug

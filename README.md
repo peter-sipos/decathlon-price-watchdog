@@ -37,15 +37,30 @@ run records a baseline and will not alert. Every later run compares against it.
 Once an alert fires, the new lower price becomes the baseline, so you get one issue per
 drop rather than a daily repeat. Price increases are recorded silently.
 
+## Getting past the bot protection
+
+Decathlon fronts both shops with a bot manager that fingerprints the TLS and HTTP/2
+handshake, not just the request headers — a plain Python request gets `403 Forbidden`.
+The script therefore escalates through three clients and uses the first that returns a
+real product page:
+
+1. **urllib** with a full Chrome header set — free and instant when it works.
+2. **curl** with HTTP/2 — a different TLS fingerprint, sometimes enough on its own.
+3. **headless Chrome** (`--dump-dom`, preinstalled on GitHub runners) — a genuine browser
+   fingerprint, and it runs the page's JavaScript.
+
+A response that is short or contains a bot-check marker counts as a failure, not a
+success, so a challenge page can never be mistaken for a product page.
+
 ## If a check breaks
 
 The job **fails loudly** rather than silently reporting nothing: if any page cannot be
-fetched or no price can be found, the script exits non-zero, GitHub emails you about the
-failed scheduled run, and the fetched HTML is uploaded as a build artifact
-(`fetched-pages`, kept 7 days) so the cause is visible.
+fetched or no price can be found, the script exits non-zero and GitHub emails you about
+the failed scheduled run.
 
-This matters because Decathlon may serve a bot-check page to GitHub's datacenter IP
-ranges, or change its markup. Both show up as a failed run, not as a false "no drops".
+The run also uploads a `fetched-pages` artifact (kept 7 days) containing the body of
+every failed attempt, named `<slug>.<strategy>.failed.html` or `.blocked.html`. That is
+what identifies the blocker — open it and the bot manager usually names itself.
 
 ## Price extraction
 
