@@ -711,6 +711,10 @@ class TextExtractor(HTMLParser):
 
 
 def visible_segments(page: str) -> list[str]:
+    # A reader proxy returns markdown or plain text rather than HTML; there the
+    # lines are already the segments.
+    if "</" not in page[:20000]:
+        return [line.strip() for line in page.splitlines() if line.strip()]
     parser = TextExtractor()
     try:
         parser.feed(page)
@@ -954,6 +958,11 @@ def main() -> int:
         listing = "search_url" in item
         url = item["search_url"] if listing else item["url"]
         link = item.get("product_url", url)
+        # Routing through a reader proxy makes the origin see the proxy's IP rather
+        # than the runner's, which is what Cloudflare is judging. Set e.g.
+        # "proxy_template": "https://r.jina.ai/{url}" once a working one is known.
+        if item.get("proxy_template"):
+            url = item["proxy_template"].format(url=url)
         key = item.get("id", link)
         name = item.get("name", link)
         slug = re.sub(r"[^a-zA-Z0-9]+", "-", url).strip("-")[-80:]

@@ -279,3 +279,25 @@ class TokenMatchingTests(unittest.TestCase):
 
     def test_fold_strips_diacritics(self):
         self.assertEqual(fold("Polštář XL"), "polstar xl")
+
+
+class PlainTextListingTests(unittest.TestCase):
+    """A reader proxy returns markdown, not HTML; lines become the segments."""
+
+    MARKDOWN = """# Vysledky hledani
+
+Quechua Pol\u0161t\u00e1\u0159 Ultim Comfort XL
+Hodnoceni 4,5
+od 399 K\u010d
+
+Quechua Pol\u0161t\u00e1\u0159 Ultim Comfort
+od 249 K\u010d
+"""
+
+    def test_markdown_listing_is_parsed(self):
+        item = {"match_all": ["ultim comfort", "xl"], "match_none": [], "expect_currency": "CZK"}
+        self.assertEqual(extract_from_listing(self.MARKDOWN, item)["price"], 399.0)
+
+    def test_markdown_respects_match_none(self):
+        item = {"match_all": ["ultim comfort"], "match_none": ["xl"], "expect_currency": "CZK"}
+        self.assertEqual(extract_from_listing(self.MARKDOWN, item)["price"], 249.0)

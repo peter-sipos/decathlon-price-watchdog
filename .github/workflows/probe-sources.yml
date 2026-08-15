@@ -1,0 +1,24 @@
+name: Probe price sources
+
+# Manual only. Reports which price sources are reachable from a GitHub runner,
+# so the watchdog can be pointed at one that works instead of discovering the
+# blocker one workflow run at a time.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Probe candidate sources
+        run: python scripts/probe_sources.py

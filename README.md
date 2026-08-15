@@ -50,8 +50,18 @@ clients were tried and all were blocked from GitHub's runners: plain HTTP and cu
 challenge. That is an IP-reputation decision by Cloudflare, so no client-side change
 fixes it.
 
-Heureka lists the same products with prices and is not challenged, so each item names a
-Heureka search page plus the matching row in the results:
+**Heureka turned out to be behind Cloudflare too**, and is challenged from GitHub
+runners exactly like Decathlon is. The blocker is not any one site: Cloudflare judges
+GitHub's datacenter IP ranges, and both shops are its customers.
+
+Run the **Probe price sources** workflow (Actions → *Probe price sources* → Run workflow)
+to see which candidates are reachable from a runner. It tests reader proxies and other
+comparison sites in one run and prints a summary table, so the source can be chosen from
+evidence instead of one failed run at a time.
+
+Once a working source is known, pointing the watchdog at it is a config change in
+`items.json` — no code change. Each item names a search page plus the matching row in
+the results:
 
 ```json
 {
@@ -59,9 +69,15 @@ Heureka search page plus the matching row in the results:
   "search_url": "https://www.heureka.cz/?h%5Bfraze%5D=ultim+comfort+polstar",
   "product_url": "https://www.decathlon.cz/p/polstar-ultim-comfort-xl/_/R-p-348187",
   "match_all": ["ultim comfort", "xl"],
-  "match_none": []
+  "match_none": [],
+  "proxy_template": "https://r.jina.ai/{url}"
 }
 ```
+
+`proxy_template` is optional. When set, the page is fetched through that reader proxy,
+so the origin sees the proxy's IP rather than the runner's — which is the thing
+Cloudflare is actually judging. Plain-text and markdown responses are parsed as well as
+HTML, so a reader proxy works as a drop-in source.
 
 `match_all` and `match_none` together pin the right result. They matter because
 *Ultim Comfort* is a substring of *Ultim Comfort XL* — without `match_none: ["xl"]` the
