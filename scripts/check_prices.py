@@ -128,21 +128,31 @@ def redact(text: str) -> str:
 
 
 def build_fetch_url(item: dict, url: str) -> str:
-    """Apply the item's scraping-service template, if it has one.
+    """The first URL to try: convenience wrapper over :func:`build_fetch_urls`."""
+    return build_fetch_urls(item, url)[0]
 
-    Templates take ``{url}``, ``{url_encoded}`` and ``{key}``, which covers the
-    scraping APIs worth using; see the README for ready-made templates.
+
+def build_fetch_urls(item: dict, url: str) -> list[str]:
+    """Expand the item's scraping-service templates, cheapest first.
+
+    Scraping APIs price by tier: a plain fetch costs a fraction of a rendered one,
+    and an ultra-premium proxy more again. Listing several templates lets a run pay
+    the cheap tier when that works and escalate only when the response comes back
+    blocked. Templates take ``{url}``, ``{url_encoded}`` and ``{key}``.
     """
-    template = item.get("proxy_template")
-    if not template:
-        return url
+    templates = item.get("proxy_templates") or (
+        [item["proxy_template"]] if item.get("proxy_template") else []
+    )
+    if not templates:
+        return [url]
     key_env = item.get("proxy_key_env", "SCRAPER_API_KEY")
     key = os.environ.get(key_env, "").strip()
-    if "{key}" in template and not key:
+    if any("{key}" in template for template in templates) and not key:
         raise FetchError(f"{key_env} is not set, but proxy_template needs an API key")
     if key:
         _SECRETS.add(key)
-    return template.format(url=url, url_encoded=urllib.parse.quote(url, safe=""), key=key)
+    encoded = urllib.parse.quote(url, safe="")
+    return [template.format(url=url, url_encoded=encoded, key=key) for template in templates]
 
 
 def browser_headers(accept_language: str, url: str) -> dict[str, str]:
@@ -362,6 +372,13 @@ FETCH_STRATEGIES = (
     ("chrome", fetch_chrome),
 )
 
+# When a scraping service is doing the fetching, it renders the page itself, so
+# driving a local browser at the API endpoint would only waste time and credits.
+DIRECT_STRATEGIES = (
+    ("urllib", fetch_urllib),
+    ("curl", fetch_curl),
+)
+
 
 def fetch(
     url: str,
@@ -369,6 +386,7 @@ def fetch(
     timeout: int = 30,
     debug_dir: Path | None = None,
     slug: str = "page",
+    strategies: tuple[tuple[str, Any], ...] | None = None,
 ) -> tuple[str, str]:
     """Try each client in turn; return (html, strategy_name) from the first that works.
 
@@ -376,7 +394,7 @@ def fetch(
     ``debug_dir`` so a failed run explains itself in the uploaded artifact.
     """
     problems: list[str] = []
-    for name, strategy in FETCH_STRATEGIES:
+    for name, strategy in strategies or FETCH_STRATEGIES:
         for attempt in range(2):
             if attempt:
                 time.sleep(3)
@@ -999,25 +1017,37 @@ def main() -> int:
         # Routing through a scraping service makes the origin see that service's IP
         # rather than the runner's, which is what Cloudflare is judging.
         try:
-            fetch_url = build_fetch_url(item, url)
+            fetch_urls = build_fetch_urls(item, url)
         except FetchError as exc:
             failures.append(f"{name}: {exc}")
             print(f"::error::{name}: {exc}", flush=True)
             continue
 
+        proxied = fetch_urls != [url]
         if url not in pages:
-            try:
-                pages[url] = fetch(
-                    fetch_url,
-                    item.get("accept_language", "en;q=0.9"),
-                    debug_dir=debug_dir,
-                    slug=slug,
-                )
-                if args.save_html:
-                    save_debug(debug_dir, f"{slug}.ok.html", pages[url][0])
-            except FetchError as exc:
-                pages[url] = ("", "")
-                print(f"::error::{url}: fetch failed ({redact(str(exc))})", flush=True)
+            pages[url] = ("", "")
+            problems: list[str] = []
+            # Templates are ordered cheapest first; stop at the first that works so
+            # the expensive tiers are only paid for when they are actually needed.
+            for tier, fetch_url in enumerate(fetch_urls, start=1):
+                try:
+                    pages[url] = fetch(
+                        fetch_url,
+                        item.get("accept_language", "en;q=0.9"),
+                        timeout=90 if proxied else 30,
+                        debug_dir=debug_dir,
+                        slug=f"{slug}.tier{tier}" if proxied else slug,
+                        strategies=DIRECT_STRATEGIES if proxied else None,
+                    )
+                    if tier > 1:
+                        print(f"::warning::{url}: needed proxy tier {tier}", flush=True)
+                    if args.save_html:
+                        save_debug(debug_dir, f"{slug}.ok.html", pages[url][0])
+                    break
+                except FetchError as exc:
+                    problems.append(f"tier {tier}: {redact(str(exc))}")
+            if not pages[url][0]:
+                print(f"::error::{url}: fetch failed ({'; '.join(problems)})", flush=True)
         page, strategy = pages[url]
         if not page:
             failures.append(f"{name}: fetch failed")

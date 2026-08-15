@@ -3,6 +3,7 @@
 
 import json
 import os
+import pathlib
 import sys
 import unittest
 from pathlib import Path
@@ -14,6 +15,7 @@ from check_prices import (  # noqa: E402
     FetchError,
     ParseError,
     build_fetch_url,
+    build_fetch_urls,
     extract_from_listing,
     extract_price,
     fold,
@@ -349,3 +351,50 @@ class ProxyTemplateTests(unittest.TestCase):
     def test_keyless_template_needs_no_secret(self):
         item = {"proxy_template": "https://r.jina.ai/{url}"}
         self.assertEqual(build_fetch_url(item, self.URL), f"https://r.jina.ai/{self.URL}")
+
+
+class ProxyEscalationTests(unittest.TestCase):
+    """Cheapest tier first; escalate only when the response comes back blocked."""
+
+    URL = "https://www.heureka.cz/?q=x"
+
+    def setUp(self):
+        check_prices._SECRETS.clear()
+        self.addCleanup(check_prices._SECRETS.clear)
+        os.environ["SCRAPER_API_KEY"] = "k"
+        self.addCleanup(lambda: os.environ.pop("SCRAPER_API_KEY", None))
+
+    def test_templates_expand_in_order(self):
+        item = {"proxy_templates": ["https://a/?k={key}&u={url_encoded}", "https://b/?k={key}"]}
+        built = build_fetch_urls(item, self.URL)
+        self.assertEqual(len(built), 2)
+        self.assertTrue(built[0].startswith("https://a/"))
+        self.assertTrue(built[1].startswith("https://b/"))
+
+    def test_singular_template_still_works(self):
+        item = {"proxy_template": "https://a/?k={key}"}
+        self.assertEqual(build_fetch_urls(item, self.URL), ["https://a/?k=k"])
+
+    def test_no_template_yields_the_plain_url(self):
+        self.assertEqual(build_fetch_urls({}, self.URL), [self.URL])
+
+    def test_build_fetch_url_returns_the_cheapest(self):
+        item = {"proxy_templates": ["https://cheap/?k={key}", "https://dear/?k={key}"]}
+        self.assertEqual(build_fetch_url(item, self.URL), "https://cheap/?k=k")
+
+    def test_missing_key_reported_once_for_the_whole_ladder(self):
+        os.environ.pop("SCRAPER_API_KEY")
+        item = {"proxy_templates": ["https://a/?k={key}", "https://b/?k={key}"]}
+        with self.assertRaises(FetchError):
+            build_fetch_urls(item, self.URL)
+
+    def test_configured_ladder_is_cheapest_first(self):
+        """The shipped config must not pay for rendering before trying without."""
+        items = json.loads(
+            (pathlib.Path(__file__).resolve().parent.parent / "items.json").read_text("utf-8")
+        )
+        for item in items:
+            ladder = item["proxy_templates"]
+            self.assertNotIn("render=true", ladder[0], item["id"])
+            self.assertNotIn("ultra_premium", ladder[0], item["id"])
+            self.assertIn("render=true", ladder[1], item["id"])

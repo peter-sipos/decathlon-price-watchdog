@@ -63,24 +63,43 @@ What works is a service that fetches the page **from its own residential IPs**. 
 repository secret `SCRAPER_API_KEY` (Settings → Secrets and variables → Actions), and the
 workflow passes it through. Ready-made templates for `proxy_template` in `items.json`:
 
-| Service | `proxy_template` |
+| Service | template |
 | --- | --- |
-| ScraperAPI | `https://api.scraperapi.com/?api_key={key}&url={url_encoded}&render=true` |
-| ScrapingBee | `https://app.scrapingbee.com/api/v1/?api_key={key}&url={url_encoded}&render_js=true&premium_proxy=true` |
+| ScraperAPI | `https://api.scraperapi.com/?api_key={key}&url={url_encoded}` |
+| ScrapingBee | `https://app.scrapingbee.com/api/v1/?api_key={key}&url={url_encoded}&premium_proxy=true` |
 | ScrapingAnt | `https://api.scrapingant.com/v2/general?url={url_encoded}&x-api-key={key}` |
-| ZenRows | `https://api.zenrows.com/v1/?apikey={key}&url={url_encoded}&js_render=true&premium_proxy=true` |
+| ZenRows | `https://api.zenrows.com/v1/?apikey={key}&url={url_encoded}&premium_proxy=true` |
 
 `{url}`, `{url_encoded}` and `{key}` are substituted; `proxy_key_env` overrides which
-environment variable holds the key. The key is redacted from every log line, error
+environment variable holds the key.
+
+### Paying the cheap tier first
+
+`proxy_templates` is a list tried **cheapest first**, stopping at the first tier that
+returns a real page. Scraping APIs charge by tier — a plain fetch costs a fraction of a
+rendered one, and the hardest anti-bot tier more again — so starting at the top would
+overpay on every run for capability that may not be needed. The shipped ladder is:
+
+1. plain fetch
+2. `&render=true`
+3. `&ultra_premium=true`
+
+When a run has to escalate it logs `needed proxy tier N` as a warning. If you see tier 3
+every day, move it to the front of the list to stop wasting the two cheaper attempts —
+and if you never see a warning, the cheapest tier is doing the job. The key is redacted from every log line, error
 message and uploaded debug file, and debug filenames are derived from the plain URL so a
 key cannot leak through a filename.
 
 ### Watch your credit budget
 
-Free tiers are typically around 1,000 credits a month, and a Cloudflare-protected site
-normally needs the premium/JS-rendering mode, which costs several credits per request
-rather than one. Exact costs vary by provider and change over time, so check your
-dashboard after the first few runs.
+Free tiers are typically around 1,000 credits a month, and the higher tiers cost several
+credits per request rather than one. Exact costs vary by provider and change over time,
+so check your dashboard after the first few runs — treat the numbers below as arithmetic
+to redo against your own plan, not as quoted prices.
+
+At 2 requests a day (~60 a month) the cheapest tier is comfortable. If every request has
+to escalate to the most expensive tier, a daily schedule can exceed a 1,000-credit
+allowance, in which case switch to every other day.
 
 The default configuration is chosen to be frugal: it reads the **two Heureka search
 pages** (one CZ, one SK), each covering two products, so one run costs 2 requests —

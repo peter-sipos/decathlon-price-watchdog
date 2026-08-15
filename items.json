@@ -11,7 +11,11 @@
     "match_none": [],
     "accept_language": "cs-CZ,cs;q=0.9,en;q=0.6",
     "expect_currency": "CZK",
-    "proxy_template": "https://api.scraperapi.com/?api_key={key}&url={url_encoded}&render=true"
+    "proxy_templates": [
+      "https://api.scraperapi.com/?api_key={key}&url={url_encoded}",
+      "https://api.scraperapi.com/?api_key={key}&url={url_encoded}&render=true",
+      "https://api.scraperapi.com/?api_key={key}&url={url_encoded}&ultra_premium=true"
+    ]
   },
   {
     "id": "cz-ultim-comfort",
@@ -26,7 +30,11 @@
     ],
     "accept_language": "cs-CZ,cs;q=0.9,en;q=0.6",
     "expect_currency": "CZK",
-    "proxy_template": "https://api.scraperapi.com/?api_key={key}&url={url_encoded}&render=true"
+    "proxy_templates": [
+      "https://api.scraperapi.com/?api_key={key}&url={url_encoded}",
+      "https://api.scraperapi.com/?api_key={key}&url={url_encoded}&render=true",
+      "https://api.scraperapi.com/?api_key={key}&url={url_encoded}&ultra_premium=true"
+    ]
   },
   {
     "id": "sk-ultim-comfort-xl",
@@ -40,7 +48,11 @@
     "match_none": [],
     "accept_language": "sk-SK,sk;q=0.9,cs;q=0.7,en;q=0.5",
     "expect_currency": "EUR",
-    "proxy_template": "https://api.scraperapi.com/?api_key={key}&url={url_encoded}&render=true"
+    "proxy_templates": [
+      "https://api.scraperapi.com/?api_key={key}&url={url_encoded}",
+      "https://api.scraperapi.com/?api_key={key}&url={url_encoded}&render=true",
+      "https://api.scraperapi.com/?api_key={key}&url={url_encoded}&ultra_premium=true"
+    ]
   },
   {
     "id": "sk-ultim-comfort",
@@ -55,6 +67,10 @@
     ],
     "accept_language": "sk-SK,sk;q=0.9,cs;q=0.7,en;q=0.5",
     "expect_currency": "EUR",
-    "proxy_template": "https://api.scraperapi.com/?api_key={key}&url={url_encoded}&render=true"
+    "proxy_templates": [
+      "https://api.scraperapi.com/?api_key={key}&url={url_encoded}",
+      "https://api.scraperapi.com/?api_key={key}&url={url_encoded}&render=true",
+      "https://api.scraperapi.com/?api_key={key}&url={url_encoded}&ultra_premium=true"
+    ]
   }
 ]
