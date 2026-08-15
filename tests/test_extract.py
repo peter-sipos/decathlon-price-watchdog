@@ -21,6 +21,7 @@ from check_prices import (  # noqa: E402
     extract_price,
     fold,
     matches_item,
+    reference_price,
     fetch,
     looks_blocked,
     money,
@@ -469,4 +470,64 @@ class RealDecathlonPageTests(unittest.TestCase):
         self.assertNotIn(result["price"], (149.0, 249.0, 2000.0))
 
     def test_real_page_is_not_flagged_as_blocked(self):
+        self.assertIsNone(looks_blocked(self.page))
+
+    def test_a_page_without_a_sale_reports_no_original_price(self):
+        """The bundle's own 149/249 pair must not become this product's "was"."""
+        self.assertIsNone(extract_price(self.page, self.item)["was_price"])
+
+
+class SaleDecathlonPageTests(unittest.TestCase):
+    """Against markup captured from a live CZ page while it was discounted.
+
+    Product 329980, a mattress rather than a watched pillow — captured only
+    because none of the four pillows were on sale. JSON-LD carries the *sale*
+    price and never the pre-sale one, so the "was" figure has to come from the
+    buy box or the flight data.
+    """
+
+    def setUp(self):
+        fixture = pathlib.Path(__file__).resolve().parent / "fixtures" / "decathlon_cz_329980_sale.html"
+        self.page = fixture.read_text(encoding="utf-8")
+        self.item = {
+            "url": "https://www.decathlon.cz/p/x/_/R-p-329980",
+            "skus": ["329980"],
+            "expect_currency": "CZK",
+        }
+
+    def test_extracts_the_sale_price_not_the_reference_price(self):
+        result = extract_price(self.page, self.item)
+        self.assertEqual(result["price"], 2999.0)
+        self.assertEqual(result["currency"], "CZK")
+        self.assertTrue(result["method"].startswith("ld+json"))
+
+    def test_json_ld_carries_the_discounted_figure(self):
+        offers = json.loads(
+            re.search(
+                r'<script type="application/ld\+json">(.*?)</script>', self.page, re.DOTALL
+            ).group(1)
+        )["@graph"][1]["offers"]
+        self.assertEqual(offers["priceSpecification"]["price"], 2999)
+        self.assertNotIn("price", offers)
+
+    def test_the_barred_price_is_reported_as_the_original(self):
+        self.assertEqual(extract_price(self.page, self.item)["was_price"], 3999.0)
+
+    def test_bundle_and_shipping_prices_are_not_picked_up(self):
+        """The page also shows 149/649 Kč bundle items, a 3 797 Kč bundle total
+        and a 2 000 Kč free-shipping threshold."""
+        result = extract_price(self.page, self.item)
+        self.assertEqual(result["candidate_count"], 1)
+        self.assertNotIn(result["price"], (149.0, 649.0, 3797.0, 2000.0, 4299.0))
+
+    def test_flight_data_reference_price_is_also_understood(self):
+        """Without the buy box, referenceValueWithTaxes still supplies the "was"."""
+        stripped = re.sub(r"<section class=\"buy-box.*?</section>", "", self.page, flags=re.DOTALL)
+        self.assertNotIn("vp-price-barred-amount", stripped)
+        self.assertEqual(reference_price(stripped, 2999.0, "CZK"), 3999.0)
+
+    def test_a_reference_price_for_a_different_amount_is_ignored(self):
+        self.assertIsNone(reference_price(self.page, 149.0, "CZK"))
+
+    def test_sale_page_is_not_flagged_as_blocked(self):
         self.assertIsNone(looks_blocked(self.page))

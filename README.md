@@ -153,6 +153,14 @@ free-shipping line and 149/249 Kč bundle items, and the fixture test asserts no
 win. The log records which source each price came from, so a silent change in the page
 structure shows up as a changed source rather than a wrong number.
 
+**When an item is on sale**, JSON-LD carries the discounted figure and no trace of the
+pre-sale one — a fixture captured from a live discounted page confirms it. The crossed-out
+"was" price is read separately, from the barred amount in the buy box or from
+`referenceValueWithTaxes` in the page's flight data, and only when it sits next to the
+price actually extracted. That keeps a bundle carousel's own sale pair out of your alert,
+at the cost of no "was" line if Decathlon restyles the buy box; the drop percentage
+against the watchdog's own baseline is reported either way.
+
 A listing extractor for comparison-site search pages also exists and is tested; see
 *Reading Decathlon directly*.
 

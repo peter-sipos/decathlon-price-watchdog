@@ -671,6 +671,37 @@ def pick_best(candidates: list[dict], expect_currency: str | None) -> dict:
     return min(pool, key=lambda c: c["price"])
 
 
+# Decathlon's JSON-LD carries the sale price and nothing else — no "was" figure at
+# all. The pre-sale price only appears twice: as the barred amount beside the sale
+# amount in the buy box, and as referenceValueWithTaxes in the page's flight data.
+# Both are read only when they sit next to the price actually extracted, so the
+# sale pair inside a bundle carousel cannot be mistaken for this product's.
+
+BARRED_PAIR = re.compile(
+    r"vp-price-amount--sale[^>]*>\s*([^<]+?)\s*</span>\s*"
+    r"<span[^>]*vp-price-barred-amount[^>]*>\s*([^<]+?)\s*</span>",
+    re.IGNORECASE,
+)
+
+FLIGHT_PRICE_PAIR = re.compile(
+    r'valueWithTaxes\\?":\s*([\d.]+).{0,200}?referenceValueWithTaxes\\?":\s*([\d.]+)',
+    re.DOTALL,
+)
+
+
+def reference_price(page: str, price: float, currency: str | None) -> float | None:
+    """The crossed-out pre-sale price, if the page shows one for *this* price."""
+    for pattern in (BARRED_PAIR, FLIGHT_PRICE_PAIR):
+        for match in pattern.finditer(page):
+            sale = to_number(match.group(1))
+            was = to_number(match.group(2))
+            if sale is None or was is None or sale != price:
+                continue
+            if was > price and plausible(was, currency):
+                return was
+    return None
+
+
 def extract_price(page: str, item: dict) -> dict:
     skus = [str(sku) for sku in item.get("skus", [])]
     candidates: list[dict] = []
@@ -693,6 +724,8 @@ def extract_price(page: str, item: dict) -> dict:
         raise ParseError("no price found in JSON-LD, embedded JSON, meta tags or page text")
 
     best = pick_best(candidates, item.get("expect_currency"))
+    if not best.get("was_price"):
+        best["was_price"] = reference_price(page, best["price"], best["currency"])
     best["candidate_count"] = len(candidates)
     return best
 
