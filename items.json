@@ -1,29 +1,41 @@
 [
   {
-    "name": "Polštář Ultim Comfort XL (Decathlon CZ)",
-    "url": "https://www.decathlon.cz/p/polstar-ultim-comfort-xl/_/R-p-348187",
-    "skus": ["348187"],
+    "id": "cz-ultim-comfort-xl",
+    "name": "Polštář Ultim Comfort XL (CZ)",
+    "search_url": "https://www.heureka.cz/?h%5Bfraze%5D=ultim+comfort+polstar",
+    "product_url": "https://www.decathlon.cz/p/polstar-ultim-comfort-xl/_/R-p-348187",
+    "match_all": ["ultim comfort", "xl"],
+    "match_none": [],
     "accept_language": "cs-CZ,cs;q=0.9,en;q=0.6",
     "expect_currency": "CZK"
   },
   {
-    "name": "Polštář Ultim Comfort (Decathlon CZ)",
-    "url": "https://www.decathlon.cz/p/polstar-ultim-comfort/_/R-p-308736",
-    "skus": ["308736"],
+    "id": "cz-ultim-comfort",
+    "name": "Polštář Ultim Comfort (CZ)",
+    "search_url": "https://www.heureka.cz/?h%5Bfraze%5D=ultim+comfort+polstar",
+    "product_url": "https://www.decathlon.cz/p/polstar-ultim-comfort/_/R-p-308736",
+    "match_all": ["ultim comfort"],
+    "match_none": ["xl"],
     "accept_language": "cs-CZ,cs;q=0.9,en;q=0.6",
     "expect_currency": "CZK"
   },
   {
-    "name": "Kempingový vankúš XL Ultim Comfort (Decathlon SK)",
-    "url": "https://www.decathlon.sk/p/348187-368243-kempingovy-vankus-xl-ultim-comfort.html",
-    "skus": ["348187", "368243"],
+    "id": "sk-ultim-comfort-xl",
+    "name": "Kempingový vankúš XL Ultim Comfort (SK)",
+    "search_url": "https://www.heureka.sk/?h%5Bfraze%5D=ultim+comfort+vankus",
+    "product_url": "https://www.decathlon.sk/p/348187-368243-kempingovy-vankus-xl-ultim-comfort.html",
+    "match_all": ["ultim comfort", "xl"],
+    "match_none": [],
     "accept_language": "sk-SK,sk;q=0.9,cs;q=0.7,en;q=0.5",
     "expect_currency": "EUR"
   },
   {
-    "name": "Kempingový vankúš Ultim Comfort (Decathlon SK)",
-    "url": "https://www.decathlon.sk/p/308736-333552-kempingovy-vankus-ultim-comfort.html",
-    "skus": ["308736", "333552"],
+    "id": "sk-ultim-comfort",
+    "name": "Kempingový vankúš Ultim Comfort (SK)",
+    "search_url": "https://www.heureka.sk/?h%5Bfraze%5D=ultim+comfort+vankus",
+    "product_url": "https://www.decathlon.sk/p/308736-333552-kempingovy-vankus-ultim-comfort.html",
+    "match_all": ["ultim comfort"],
+    "match_none": ["xl"],
     "accept_language": "sk-SK,sk;q=0.9,cs;q=0.7,en;q=0.5",
     "expect_currency": "EUR"
   }

@@ -11,7 +11,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import check_prices  # noqa: E402
 from check_prices import (  # noqa: E402
     FetchError,
+    ParseError,
+    extract_from_listing,
     extract_price,
+    fold,
+    matches_item,
     fetch,
     looks_blocked,
     money,
@@ -188,3 +192,90 @@ class FetchFallbackTests(unittest.TestCase):
             fetch("https://example.test/p", "cs-CZ")
         self.assertIn("urllib: HTTP 403", str(caught.exception))
         self.assertIn("chrome: no Chrome", str(caught.exception))
+
+
+class ListingExtractionTests(unittest.TestCase):
+    """Heureka search results: many products on one page, pick the right row."""
+
+    CZ_XL = {
+        "match_all": ["ultim comfort", "xl"],
+        "match_none": [],
+        "expect_currency": "CZK",
+    }
+    CZ_PLAIN = {
+        "match_all": ["ultim comfort"],
+        "match_none": ["xl"],
+        "expect_currency": "CZK",
+    }
+
+    LISTING = """<html><head><title>ultim comfort polstar - Heureka.cz</title></head><body>
+      <h1>Vysledky hledani pro ultim comfort polstar</h1>
+      <article><a href="/x">Quechua Polstar Ultim Comfort XL</a>
+        <span>Hodnoceni 4,5</span><span>od&nbsp;399&nbsp;K&#269;</span></article>
+      <article><a href="/y">Quechua Pol&#353;t&#225;&#345; Ultim Comfort</a>
+        <span>Hodnoceni 4,7</span><span>od&nbsp;249&nbsp;K&#269;</span></article>
+      <article><a href="/z">Coleman Nafukovaci polstar Comfort</a>
+        <span>od&nbsp;199&nbsp;K&#269;</span></article>
+    </body></html>"""
+
+    def test_picks_the_xl_variant(self):
+        result = extract_from_listing(self.LISTING, self.CZ_XL)
+        self.assertEqual(result["price"], 399.0)
+        self.assertIn("XL", result["matched_name"])
+
+    def test_excludes_xl_for_the_plain_variant(self):
+        """'Ultim Comfort' is a substring of 'Ultim Comfort XL' - match_none guards it."""
+        result = extract_from_listing(self.LISTING, self.CZ_PLAIN)
+        self.assertEqual(result["price"], 249.0)
+        self.assertNotIn("XL", result["matched_name"])
+
+    def test_ignores_unrelated_products(self):
+        for item in (self.CZ_XL, self.CZ_PLAIN):
+            self.assertNotEqual(extract_from_listing(self.LISTING, item)["price"], 199.0)
+
+    def test_diacritics_are_folded(self):
+        """The listing writes 'Polstar' with diacritics; match_all does not."""
+        result = extract_from_listing(self.LISTING, self.CZ_PLAIN)
+        self.assertIn("Ultim Comfort", result["matched_name"])
+
+    def test_slovak_euro_prices(self):
+        listing = """<html><body>
+          <article><a href="/a">Quechua Vankus Ultim Comfort XL</a>
+            <span>od&nbsp;12,99&nbsp;&euro;</span></article>
+        </body></html>"""
+        item = {"match_all": ["ultim comfort", "xl"], "match_none": [], "expect_currency": "EUR"}
+        self.assertEqual(extract_from_listing(listing, item)["price"], 12.99)
+
+    def test_missing_product_reports_what_was_on_the_page(self):
+        item = {"match_all": ["nonexistent product"], "match_none": [], "expect_currency": "CZK"}
+        with self.assertRaises(ParseError) as caught:
+            extract_from_listing(self.LISTING, item)
+        self.assertIn("Ultim Comfort", str(caught.exception))
+
+    def test_jsonld_listing_is_preferred(self):
+        payload = {
+            "@type": "ItemList",
+            "itemListElement": [
+                {
+                    "@type": "Product",
+                    "name": "Quechua Polstar Ultim Comfort XL",
+                    "offers": {"@type": "Offer", "price": "379", "priceCurrency": "CZK"},
+                }
+            ],
+        }
+        page_html = f'<html><body><script type="application/ld+json">{json.dumps(payload)}</script>'
+        page_html += "<article><a>Quechua Polstar Ultim Comfort XL</a><span>od 399 Kc</span></article>"
+        page_html += "</body></html>"
+        result = extract_from_listing(page_html, self.CZ_XL)
+        self.assertEqual(result["price"], 379.0)
+        self.assertEqual(result["method"], "listing-json")
+
+
+class TokenMatchingTests(unittest.TestCase):
+    def test_short_tokens_match_whole_words_only(self):
+        item = {"match_all": ["xl"], "match_none": []}
+        self.assertTrue(matches_item("Polstar Ultim Comfort XL", item))
+        self.assertFalse(matches_item("Polstar Ultim Comfort XLarge Deluxe", item))
+
+    def test_fold_strips_diacritics(self):
+        self.assertEqual(fold("Polštář XL"), "polstar xl")

@@ -22,9 +22,11 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 import zlib
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -645,6 +647,201 @@ def extract_price(page: str, item: dict) -> dict:
     return best
 
 
+# --------------------------------------------------------------------------- listing pages
+
+# Decathlon's own pages are behind a Cloudflare challenge that an unattended runner
+# cannot clear, so prices are read from a price-comparison search listing instead.
+# A listing holds many products, so each item says which result is which.
+
+PRICE_IN_TEXT = re.compile(
+    r"(?:od\s*)?(\d{1,3}(?:[\s ]?\d{3})*(?:[.,]\d{1,2})?)\s*(Kč|€|EUR|CZK)",
+    re.IGNORECASE,
+)
+
+# How many text nodes after a product name may hold its price. A card renders the
+# name, then rating/shop/availability, then the price.
+NAME_TO_PRICE_WINDOW = 25
+
+
+def fold(text: str) -> str:
+    """Lowercase and strip diacritics, so 'Polštář' matches 'polstar'."""
+    decomposed = unicodedata.normalize("NFKD", text.lower())
+    return "".join(char for char in decomposed if not unicodedata.combining(char))
+
+
+def contains_token(haystack: str, token: str) -> bool:
+    """Short tokens like 'xl' must match as whole words, not inside another word."""
+    folded_token = fold(token)
+    if len(folded_token) <= 3:
+        return re.search(rf"(?<![a-z0-9]){re.escape(folded_token)}(?![a-z0-9])", haystack) is not None
+    return folded_token in haystack
+
+
+def matches_item(name: str, item: dict) -> bool:
+    folded = fold(name)
+    if not all(contains_token(folded, token) for token in item.get("match_all", [])):
+        return False
+    return not any(contains_token(folded, token) for token in item.get("match_none", []))
+
+
+class TextExtractor(HTMLParser):
+    """Collect visible text nodes in document order."""
+
+    SKIP = {"script", "style", "noscript", "title", "head", "svg"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.segments: list[str] = []
+        self._depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self.SKIP:
+            self._depth += 1
+
+    def handle_endtag(self, tag):
+        if tag in self.SKIP and self._depth:
+            self._depth -= 1
+
+    def handle_data(self, data):
+        if self._depth:
+            return
+        text = " ".join(data.split())
+        if text:
+            self.segments.append(text)
+
+
+def visible_segments(page: str) -> list[str]:
+    parser = TextExtractor()
+    try:
+        parser.feed(page)
+    except Exception:  # noqa: BLE001 - malformed markup must not abort the run
+        pass
+    return parser.segments
+
+
+def price_in(text: str, expect_currency: str | None) -> tuple[float, str] | None:
+    for match in PRICE_IN_TEXT.finditer(text):
+        currency = normalise_currency(match.group(2)) or CURRENCY_SYMBOLS.get(match.group(2))
+        price = to_number(match.group(1))
+        if price is None or not plausible(price, currency):
+            continue
+        if expect_currency and currency and currency != expect_currency:
+            continue
+        return price, currency or (expect_currency or "")
+    return None
+
+
+def listing_candidates_from_json(data: Any, item: dict) -> list[dict]:
+    """Any JSON object carrying both a matching name and a price."""
+    found: list[dict] = []
+    for node in iter_nodes(data):
+        keys = lowered(node)
+        name = keys.get("name") or keys.get("title") or keys.get("productname")
+        if not isinstance(name, str) or not matches_item(name, item):
+            continue
+        offers = keys.get("offers")
+        for offer in iter_nodes(offers) if offers else [node]:
+            if not isinstance(offer, dict):
+                continue
+            offer_keys = lowered(offer)
+            currency = next(
+                (
+                    normalise_currency(offer_keys[key])
+                    for key in CURRENCY_KEYS
+                    if normalise_currency(offer_keys.get(key))
+                ),
+                None,
+            )
+            for price_key in PRICE_KEYS:
+                value = offer_keys.get(price_key)
+                price = to_number(value.get("value") if isinstance(value, dict) else value)
+                if price is None or not plausible(price, currency or item.get("expect_currency")):
+                    continue
+                found.append(
+                    {
+                        "price": price,
+                        "currency": currency or item.get("expect_currency"),
+                        "method": "listing-json",
+                        "matched_name": name,
+                    }
+                )
+                break
+    return found
+
+
+def listing_candidates_from_text(segments: list[str], item: dict) -> list[dict]:
+    """Pair a product name with the first price that follows it in the card."""
+    expect = item.get("expect_currency")
+    found: list[dict] = []
+    for index, segment in enumerate(segments):
+        # A product name is a phrase, not a stray word or a whole paragraph.
+        if not (10 <= len(segment) <= 160) or not matches_item(segment, item):
+            continue
+        if price_in(segment, expect):
+            continue  # this segment is itself a price line, not a name
+        for offset in range(1, NAME_TO_PRICE_WINDOW + 1):
+            if index + offset >= len(segments):
+                break
+            hit = price_in(segments[index + offset], expect)
+            if hit:
+                found.append(
+                    {
+                        "price": hit[0],
+                        "currency": hit[1],
+                        "method": "listing-text",
+                        "matched_name": segment,
+                    }
+                )
+                break
+    return found
+
+
+def listing_overview(segments: list[str], limit: int = 12) -> list[str]:
+    """Product-looking names on the page, to explain a failed match."""
+    names: list[str] = []
+    for index, segment in enumerate(segments):
+        if not (10 <= len(segment) <= 160) or price_in(segment, None):
+            continue
+        window = segments[index + 1 : index + 1 + NAME_TO_PRICE_WINDOW]
+        if any(price_in(part, None) for part in window):
+            if segment not in names:
+                names.append(segment)
+        if len(names) >= limit:
+            break
+    return names
+
+
+def extract_from_listing(page: str, item: dict) -> dict:
+    candidates: list[dict] = []
+    for kind, blob in script_blobs(page):
+        try:
+            data = json.loads(blob.strip())
+        except (json.JSONDecodeError, ValueError):
+            continue
+        candidates.extend(listing_candidates_from_json(data, item))
+        del kind
+
+    segments = visible_segments(page)
+    if not candidates:
+        candidates.extend(listing_candidates_from_text(segments, item))
+
+    if not candidates:
+        seen = listing_overview(segments)
+        detail = "; ".join(seen) if seen else "no product-like entries found"
+        raise ParseError(
+            f"no listing entry matched {item.get('match_all')} "
+            f"(excluding {item.get('match_none')}). Products on the page: {detail}"
+        )
+
+    # Several variants of one product can match; the cheapest is the live offer.
+    best = min(candidates, key=lambda candidate: candidate["price"])
+    best["candidate_count"] = len(candidates)
+    best["all_candidates"] = [
+        f"{candidate['matched_name']} = {candidate['price']}" for candidate in candidates[:8]
+    ]
+    return best
+
+
 # --------------------------------------------------------------------------- reporting
 
 
@@ -683,8 +880,18 @@ def build_issue_body(drops: list[dict], checked_at: str) -> str:
         lines.append(
             f"- Previous price seen by the watchdog: {money(drop['previous_price'], currency)}"
         )
-        lines.append(f"- Link: {drop['url']}")
+        lines.append(f"- Buy at Decathlon: {drop['url']}")
+        if drop.get("source_url"):
+            lines.append(f"- Price read from: {drop['source_url']}")
+        if drop.get("matched_name"):
+            lines.append(f"- Matched listing entry: `{drop['matched_name']}`")
         lines.append("")
+    lines.append(
+        "_Prices come from the Heureka comparison listing, because Decathlon's own pages are "
+        "behind a Cloudflare challenge. Heureka shows the cheapest offer across shops, so "
+        "confirm on the Decathlon page before buying._"
+    )
+    lines.append("")
     lines.append(f"_Checked at {checked_at}._")
     return "\n".join(lines)
 
@@ -738,24 +945,36 @@ def main() -> int:
     # HTML of successful fetches.
     debug_dir = Path(args.save_html) if args.save_html else Path("debug")
 
+    # Two search pages cover all four items, so fetch each page only once.
+    pages: dict[str, tuple[str, str]] = {}
+
     for item in items:
-        url = item["url"]
-        name = item.get("name", url)
+        # A listing item reads its price off a search page; a direct item reads its
+        # own product page. Both are supported so the source can be switched back.
+        listing = "search_url" in item
+        url = item["search_url"] if listing else item["url"]
+        link = item.get("product_url", url)
+        key = item.get("id", link)
+        name = item.get("name", link)
         slug = re.sub(r"[^a-zA-Z0-9]+", "-", url).strip("-")[-80:]
-        try:
-            page, strategy = fetch(
-                url, item.get("accept_language", "en;q=0.9"), debug_dir=debug_dir, slug=slug
-            )
-        except FetchError as exc:
-            failures.append(f"{name}: fetch failed ({exc})")
-            print(f"::error::{name}: fetch failed ({exc})", flush=True)
+
+        if url not in pages:
+            try:
+                pages[url] = fetch(
+                    url, item.get("accept_language", "en;q=0.9"), debug_dir=debug_dir, slug=slug
+                )
+                if args.save_html:
+                    save_debug(debug_dir, f"{slug}.ok.html", pages[url][0])
+            except FetchError as exc:
+                pages[url] = ("", "")
+                print(f"::error::{url}: fetch failed ({exc})", flush=True)
+        page, strategy = pages[url]
+        if not page:
+            failures.append(f"{name}: fetch failed")
             continue
 
-        if args.save_html:
-            save_debug(debug_dir, f"{slug}.ok.html", page)
-
         try:
-            result = extract_price(page, item)
+            result = extract_from_listing(page, item) if listing else extract_price(page, item)
         except ParseError as exc:
             save_debug(debug_dir, f"{slug}.unparsed.html", page)
             failures.append(f"{name}: {exc}")
@@ -764,7 +983,7 @@ def main() -> int:
 
         price = result["price"]
         currency = result["currency"] or item.get("expect_currency")
-        previous = state.get(url, {})
+        previous = state.get(key, {})
         previous_price = previous.get("price")
         previous_currency = previous.get("currency")
 
@@ -778,11 +997,13 @@ def main() -> int:
             drops.append(
                 {
                     "name": name,
-                    "url": url,
+                    "url": link,
+                    "source_url": url,
                     "price": price,
                     "previous_price": float(previous_price),
                     "currency": currency,
                     "was_price": result.get("was_price"),
+                    "matched_name": result.get("matched_name"),
                 }
             )
         elif previous_price is None:
@@ -795,6 +1016,11 @@ def main() -> int:
             f"candidates: {result['candidate_count']}){note}",
             flush=True,
         )
+        # The listing holds many products, so record which row the price came from.
+        if result.get("matched_name"):
+            print(f"    matched listing entry: {result['matched_name']!r}", flush=True)
+        for extra in result.get("all_candidates", [])[1:]:
+            print(f"    other match: {extra}", flush=True)
 
         entry = {
             "name": name,
@@ -803,12 +1029,14 @@ def main() -> int:
             "source": result["method"],
             "last_checked": checked_at,
         }
+        if result.get("matched_name"):
+            entry["matched_listing_entry"] = result["matched_name"]
         if result.get("was_price"):
             entry["listed_original_price"] = result["was_price"]
         entry["last_changed"] = (
             checked_at if previous_price != price else previous.get("last_changed", checked_at)
         )
-        state[url] = entry
+        state[key] = entry
 
     if not args.dry_run:
         state_path.parent.mkdir(parents=True, exist_ok=True)

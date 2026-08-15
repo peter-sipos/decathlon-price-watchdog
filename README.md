@@ -4,6 +4,10 @@ A free GitHub Actions workflow that checks four Decathlon CZ/SK pillow listings 
 day and opens a GitHub issue — which GitHub emails to you — whenever one of them gets
 cheaper.
 
+Prices are read from **Heureka** search results, not from Decathlon directly: both
+Decathlon shops sit behind a Cloudflare challenge that an unattended runner cannot
+clear. See *Why Heureka* below.
+
 ## Watched items
 
 | Item | Shop |
@@ -37,25 +41,43 @@ run records a baseline and will not alert. Every later run compares against it.
 Once an alert fires, the new lower price becomes the baseline, so you get one issue per
 drop rather than a daily repeat. Price increases are recorded silently.
 
-## Getting past the bot protection
+## Why Heureka
 
-Both shops sit behind **Cloudflare**, which serves a managed challenge (`Just a moment…`
-/ `Okamžik…` / `Len chvíľu…`) instead of the product page. The script escalates through
-four clients and uses the first that returns a real product page:
+Decathlon's own product pages are served through **Cloudflare**, which returns a managed
+challenge (`Just a moment…` / `Okamžik…` / `Len chvíľu…`) instead of the page. Three
+clients were tried and all were blocked from GitHub's runners: plain HTTP and curl get a
+`403`, and a real browser driven by Playwright still sat on an unsolved interactive
+challenge. That is an IP-reputation decision by Cloudflare, so no client-side change
+fixes it.
 
-1. **urllib** with a full Chrome header set — instant when it works; currently gets 403.
-2. **curl** with HTTP/2 — a different TLS fingerprint; currently gets 403.
-3. **Playwright** driving the runner's Chrome — loads the page and *waits* for the
-   interstitial to clear, polling until the challenge markers disappear.
-4. **headless Chrome** `--dump-dom` — a dependency-free fallback for local runs.
+Heureka lists the same products with prices and is not challenged, so each item names a
+Heureka search page plus the matching row in the results:
 
-Steps 1 and 2 fail against a challenge by design; step 3 is the one that has to work.
+```json
+{
+  "id": "cz-ultim-comfort-xl",
+  "search_url": "https://www.heureka.cz/?h%5Bfraze%5D=ultim+comfort+polstar",
+  "product_url": "https://www.decathlon.cz/p/polstar-ultim-comfort-xl/_/R-p-348187",
+  "match_all": ["ultim comfort", "xl"],
+  "match_none": []
+}
+```
 
-A response is only treated as success if it is not a challenge page. Detection keys on
-locale-independent markers (`/cdn-cgi/challenge-platform`, `_cf_chl`) plus known
-interstitial titles in English, Czech and Slovak — matching English text alone let a
-localised challenge masquerade as a real page. A page merely *referencing* Turnstile for
-a login widget is not treated as blocked.
+`match_all` and `match_none` together pin the right result. They matter because
+*Ultim Comfort* is a substring of *Ultim Comfort XL* — without `match_none: ["xl"]` the
+non-XL item would happily match the XL row. Matching folds diacritics, so `polstar`
+matches `Polštář`, and short tokens like `xl` match whole words only.
+
+Two caveats worth knowing:
+
+- **Heureka shows the cheapest offer across all shops**, which need not be Decathlon's.
+  For these Decathlon own-brand pillows Decathlon is normally the only seller, but the
+  alert says where the price came from so you can confirm before buying.
+- The alert still links to the **Decathlon** product page, since that is where you buy.
+
+The fetch chain (urllib → curl → Playwright → headless Chrome) is unchanged and still
+detects challenge pages, so if Heureka ever starts challenging too, the run fails loudly
+rather than inventing a price.
 
 ## If a check breaks
 
@@ -69,19 +91,17 @@ what identifies the blocker — open it and the bot manager usually names itself
 
 ## Price extraction
 
-Prices are read in order of reliability, stopping at the first source that yields a
-plausible figure:
+For a Heureka listing, in order of reliability:
 
-1. `schema.org` **JSON-LD** `Product.offers.price` — preferred, and filtered to the offer
-   whose product blob mentions the item's SKU, so recommended-product carousels on the
-   same page cannot be mistaken for the item you are watching.
-2. Embedded JSON (`__NEXT_DATA__` and other JSON script blocks), for any dict carrying
-   both a price-like and a currency-like key.
-3. `product:price:amount` / `og:price:amount` meta tags.
-4. Visible page text with a `Kč` or `€` symbol, as a last resort.
+1. **JSON-LD / embedded JSON** — any object whose `name` matches the item and that
+   carries a price. Preferred, because the pairing is explicit.
+2. **Visible text** — find the product name among the page's text nodes, then take the
+   first price within the following 25 nodes, which is the same card.
 
-Every candidate is bounds-checked per currency, so a `0`, a free-shipping threshold, or a
-stray banner figure cannot become your baseline.
+Every candidate is bounds-checked per currency, so a `0`, a free-shipping threshold or a
+stray banner figure cannot become your baseline. When several rows match, the cheapest
+wins and the others are printed in the log. The run also prints and stores which listing
+row a price came from, so a mismatch is visible rather than silent.
 
 ## Local use
 
@@ -93,23 +113,14 @@ python3 scripts/check_prices.py --save-html debug   # keep the fetched HTML to i
 
 ## Adding items
 
-Append to `items.json`:
+Append to `items.json` using the shape shown under *Why Heureka*. Give every item a
+unique `id` — it keys the stored price, so changing it resets that item's baseline.
 
-```json
-{
-  "name": "Product name",
-  "url": "https://www.decathlon.cz/p/...",
-  "skus": ["123456"],
-  "accept_language": "cs-CZ,cs;q=0.9,en;q=0.6",
-  "expect_currency": "CZK"
-}
-```
-
-`skus` should list the numeric IDs in the product URL — they are what pins extraction to
-the right product on the page.
+Check the log after adding one: it prints the listing row each price was matched from.
 
 ## Cost
 
-Free. One run a day, a few seconds each, no dependency install (standard library only).
+Free. One run a day, well under a minute. The only dependency is Playwright, kept as a
+fallback fetch strategy; extraction itself is standard library only.
 Public repositories get unlimited Actions minutes; private ones bill this at roughly a
 minute a month against the free tier.

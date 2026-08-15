@@ -74,8 +74,10 @@ jobs:
           echo "::error::could not push the updated price data"
           exit 1
 
+      # Uploaded on success too, until the Heureka listing parsing has been confirmed
+      # against a real page: a plausible-but-wrong price is worse than a failure.
       - name: Upload fetched pages for debugging
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: fetched-pages
