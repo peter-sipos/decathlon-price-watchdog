@@ -24,26 +24,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      # Decathlon's bot manager rejects plain HTTP clients, so the script falls back
-      # to headless Chrome. Record which browser the runner actually provides.
-      - name: Report available browser
-        run: |
-          for candidate in google-chrome google-chrome-stable chromium chromium-browser; do
-            if command -v "$candidate" >/dev/null 2>&1; then
-              echo "$candidate -> $("$candidate" --version 2>&1 | head -1)"
-            fi
-          done
-          command -v google-chrome >/dev/null 2>&1 || echo "::warning::no Google Chrome on this runner"
-
-      # Cloudflare's interstitial has to be waited out in a real browser. Playwright
-      # drives the runner's preinstalled Chrome, so no browser download is needed.
-      - name: Install Playwright
-        run: pip install --disable-pip-version-check playwright==1.47.0
-
       - name: Check prices
         id: check
         env:
-          # Only needed while items.json routes through a scraping service.
+          # items.json routes every fetch through a scraping service.
           SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
         run: python scripts/check_prices.py --save-html debug
 
@@ -77,8 +61,8 @@ jobs:
           echo "::error::could not push the updated price data"
           exit 1
 
-      # Uploaded on success too, until the Heureka listing parsing has been confirmed
-      # against a real page: a plausible-but-wrong price is worse than a failure.
+      # Uploaded on success too: a plausible-but-wrong price is worse than a
+      # failure, so every run leaves the page it actually parsed behind.
       - name: Upload fetched pages for debugging
         if: always()
         uses: actions/upload-artifact@v4

@@ -45,19 +45,12 @@ drop rather than a daily repeat. Price increases are recorded silently.
 
 ## Why a scraping service
 
-Both Decathlon shops **and Heureka** are Cloudflare customers, and Cloudflare challenges
-GitHub's datacenter IP ranges. Everything client-side was tried and blocked:
-
-| Client | Result |
-| --- | --- |
-| urllib with full Chrome headers | `403` |
-| curl with HTTP/2 | `403` |
-| Playwright driving real Chrome | unsolved interactive challenge |
-| headless Chrome `--dump-dom` | unsolved interactive challenge |
-
-This is an IP-reputation decision, so no client-side change fixes it. Note that Scrapy
-would not help either: it is a scraping *framework* that runs on your own machine, so it
-would come from the same blocked IP.
+Decathlon fronts both shops with Cloudflare, which challenges GitHub's datacenter IP
+ranges. Every client-side approach was tried from a runner and blocked: urllib with a
+full Chrome header set and curl over HTTP/2 both got `403`, and Playwright and headless
+Chrome both got an interactive challenge they could not clear. It is an IP-reputation
+decision, so no client-side change fixes it — Scrapy included, since that is a scraping
+*framework* running on your own machine, from the same blocked IP.
 
 What works is a service that fetches the page **from its own residential IPs**. Set the
 repository secret `SCRAPER_API_KEY` (Settings → Secrets and variables → Actions), and the
@@ -74,16 +67,6 @@ workflow passes it through. Ready-made templates for `proxy_template` in `items.
 environment variable holds the key. The key is redacted from every log line, error
 message and uploaded debug file, and debug filenames derive from the plain URL, so a key
 cannot leak through a filename either.
-
-### Reading Decathlon directly
-
-The scraping service reaches Decathlon's own product pages on its cheapest tier, so the
-watchdog reads the real Decathlon price rather than a comparison site's cheapest-across-
-shops figure. That costs 4 requests per run, one per product.
-
-An earlier version read two Heureka search pages instead, to halve the request count
-while Decathlon looked unreachable. That code is still present and tested: give an item
-`search_url` plus `match_all`/`match_none` instead of `url`/`skus` to use it.
 
 ### Paying the cheap tier first
 
@@ -110,17 +93,10 @@ to redo against your own plan, not as quoted prices.
 One run costs **4 requests**, one per product — roughly 120 a month, which the cheapest
 tier handles comfortably inside a typical 1,000-credit allowance. If requests start
 escalating to the most expensive tier, a daily schedule could exceed it; switch to every
-other day (`0 5 */2 * *`), or read the two Heureka search pages instead to halve the
-count.
+other day (`0 5 */2 * *`).
 
-The fetch chain still detects challenge pages, so if the service ever returns one, the
+Challenge pages are still detected on the way in, so if the service ever returns one, the
 run fails loudly rather than inventing a price.
-
-### Probing alternatives
-
-`Actions → Probe price sources → Run workflow` tests reader proxies and other CZ/SK
-comparison sites from a runner and prints which are reachable. Use it if you would rather
-find a free source than spend credits.
 
 ## If a check breaks
 
@@ -129,8 +105,8 @@ fetched or no price can be found, the script exits non-zero and GitHub emails yo
 the failed scheduled run.
 
 The run also uploads a `fetched-pages` artifact (kept 7 days) containing the body of
-every failed attempt, named `<slug>.<strategy>.failed.html` or `.blocked.html`. That is
-what identifies the blocker — open it and the bot manager usually names itself.
+every failed attempt, named `<slug>.tierN.failed.html` or `.blocked.html`. That is what
+identifies the blocker — open it and the bot manager usually names itself.
 
 ## Price extraction
 
@@ -161,23 +137,24 @@ price actually extracted. That keeps a bundle carousel's own sale pair out of yo
 at the cost of no "was" line if Decathlon restyles the buy box; the drop percentage
 against the watchdog's own baseline is reported either way.
 
-A listing extractor for comparison-site search pages also exists and is tested; see
-*Reading Decathlon directly*.
-
 ## Local use
 
 ```bash
 python3 -m unittest discover -s tests -v      # offline parser tests, no network needed
-python3 scripts/check_prices.py --dry-run     # check prices without writing state
-python3 scripts/check_prices.py --save-html debug   # keep the fetched HTML to inspect
+SCRAPER_API_KEY=... python3 scripts/check_prices.py --dry-run   # check without writing state
+SCRAPER_API_KEY=... python3 scripts/check_prices.py --save-html debug   # keep the HTML
 ```
+
+The script is standard library only, so there is nothing to install.
 
 ## Adding items
 
 Append to `items.json` using the shape of the existing entries. Give every item a
-unique `id` — it keys the stored price, so changing it resets that item's baseline.
+unique `id` — it keys the stored price, so changing it resets that item's baseline, and
+`skus` so the right offer is picked out of a page that also advertises bundles.
 
-Check the log after adding one: it prints the listing row each price was matched from.
+Check the log after adding one: it prints which source each price came from and how many
+candidates were in play. Every extra item costs one more request per run.
 
 ## Cost
 

@@ -17,17 +17,12 @@ import html
 import json
 import os
 import re
-import shutil
-import subprocess
 import sys
-import tempfile
 import time
-import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
 import zlib
-from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -57,19 +52,22 @@ CURRENCY_SYMBOLS = {"Kč": "CZK", "€": "EUR"}
 # Non-breaking space, used as the thousands separator in CZ/SK price formatting.
 NBSP = "\u00a0"
 
-# How long to let a browser sit on a Cloudflare interstitial before giving up.
-CHALLENGE_WAIT_SECONDS = 45
-
 MIN_PLAUSIBLE = {"CZK": 20.0, "EUR": 1.0}
 MAX_PLAUSIBLE = {"CZK": 100000.0, "EUR": 4000.0}
 
 
 class FetchError(Exception):
-    """A fetch attempt failed. ``body`` holds the response for diagnostics."""
+    """A fetch attempt failed. ``body`` holds the response for diagnostics.
 
-    def __init__(self, message: str, body: str = "") -> None:
+    ``transient`` marks a connection-level failure, which is worth one retry.
+    An HTTP rejection or a bot-check page is a decision rather than a hiccup:
+    retrying it spends another scraping credit to be told the same thing.
+    """
+
+    def __init__(self, message: str, body: str = "", transient: bool = False) -> None:
         super().__init__(message)
         self.body = body
+        self.transient = transient
 
 
 class ParseError(Exception):
@@ -78,10 +76,11 @@ class ParseError(Exception):
 
 # --------------------------------------------------------------------------- fetch
 
-# Decathlon fronts both shops with a bot manager that fingerprints the TLS and
-# HTTP/2 handshake, not just the headers. A plain Python request is rejected with
-# 403, so we escalate through progressively more browser-like clients and use the
-# first one that returns a real product page.
+# Decathlon fronts both shops with Cloudflare, which rejects GitHub's runner IPs
+# outright — no client-side trick gets past it, so every request goes through a
+# scraping service that fetches from its own address. What is left here is a plain
+# HTTP client pointed at that service, plus the check that what came back is a
+# product page rather than the challenge the service failed to clear.
 
 # Markers that only ever appear on an interception page. Bare "turnstile" or
 # "challenges.cloudflare.com" are deliberately absent: a genuine page may reference
@@ -125,11 +124,6 @@ def redact(text: str) -> str:
         if secret:
             text = text.replace(secret, "***REDACTED***")
     return text
-
-
-def build_fetch_url(item: dict, url: str) -> str:
-    """The first URL to try: convenience wrapper over :func:`build_fetch_urls`."""
-    return build_fetch_urls(item, url)[0]
 
 
 def build_fetch_urls(item: dict, url: str) -> list[str]:
@@ -227,157 +221,7 @@ def fetch_urllib(url: str, accept_language: str, timeout: int) -> str:
         server = exc.headers.get("Server", "?") if exc.headers else "?"
         raise FetchError(f"HTTP {exc.code} (server: {server})", body) from exc
     except (urllib.error.URLError, OSError, EOFError) as exc:
-        raise FetchError(f"{type(exc).__name__}: {exc}") from exc
-
-
-def fetch_curl(url: str, accept_language: str, timeout: int) -> str:
-    """curl negotiates HTTP/2 with an OpenSSL fingerprint unlike Python's."""
-    if not shutil.which("curl"):
-        raise FetchError("curl is not installed")
-    command = ["curl", "-sS", "-L", "--http2", "--compressed", "--max-time", str(timeout)]
-    for key, value in browser_headers(accept_language, url).items():
-        if key != "Accept-Encoding":  # --compressed sets this itself
-            command += ["-H", f"{key}: {value}"]
-    command += ["-w", "\n__HTTP_STATUS__:%{http_code}", url]
-    try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout + 15)
-    except subprocess.TimeoutExpired as exc:
-        raise FetchError("curl timed out") from exc
-    body, _, status = result.stdout.rpartition("\n__HTTP_STATUS__:")
-    if result.returncode != 0:
-        raise FetchError(f"curl exited {result.returncode}: {result.stderr.strip()[:200]}", body)
-    if status.strip() != "200":
-        raise FetchError(f"HTTP {status.strip()}", body)
-    return body
-
-
-def find_chrome() -> str | None:
-    candidates = [os.environ.get("CHROME_BIN"), os.environ.get("CHROME_PATH")]
-    candidates += [
-        "google-chrome",
-        "google-chrome-stable",
-        "chromium",
-        "chromium-browser",
-    ]
-    for candidate in candidates:
-        if candidate and shutil.which(candidate):
-            return shutil.which(candidate)
-    playwright_root = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
-    if playwright_root:
-        for path in sorted(Path(playwright_root).glob("chromium*/chrome-linux/chrome")):
-            if path.is_file():
-                return str(path)
-    return None
-
-
-def fetch_chrome(url: str, accept_language: str, timeout: int) -> str:
-    """Real Chrome: correct TLS fingerprint, and it runs the page's JavaScript."""
-    chrome = find_chrome()
-    if not chrome:
-        raise FetchError("no Chrome/Chromium binary found")
-    with tempfile.TemporaryDirectory(prefix="price-watch-chrome-") as profile:
-        command = [
-            chrome,
-            "--headless=new",
-            "--disable-gpu",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-extensions",
-            "--disable-blink-features=AutomationControlled",
-            f"--user-data-dir={profile}",
-            f"--lang={accept_language.split(',')[0]}",
-            f"--accept-lang={accept_language}",
-            f"--user-agent={USER_AGENT}",
-            "--virtual-time-budget=15000",
-            "--dump-dom",
-            url,
-        ]
-        try:
-            result = subprocess.run(command, capture_output=True, text=True, timeout=timeout + 45)
-        except subprocess.TimeoutExpired as exc:
-            raise FetchError("headless Chrome timed out") from exc
-    if result.returncode != 0:
-        raise FetchError(
-            f"headless Chrome exited {result.returncode}: {result.stderr.strip()[:200]}",
-            result.stdout,
-        )
-    return result.stdout
-
-
-def fetch_playwright(url: str, accept_language: str, timeout: int) -> str:
-    """Drive a real browser and wait for Cloudflare's interstitial to resolve.
-
-    ``fetch_chrome`` only snapshots the DOM once, which captures the challenge page
-    rather than the product; the challenge needs real wall-clock time and network
-    round trips to clear. This keeps polling until the markers disappear.
-    """
-    try:
-        from playwright.sync_api import Error as PlaywrightError
-        from playwright.sync_api import sync_playwright
-    except ImportError as exc:
-        raise FetchError("playwright is not installed") from exc
-
-    locale = accept_language.split(",")[0]
-    args = [
-        "--disable-blink-features=AutomationControlled",
-        "--no-sandbox",
-        "--disable-dev-shm-usage",
-    ]
-    last_content = ""
-    try:
-        with sync_playwright() as engine:
-            browser = None
-            for channel in ("chrome", None):
-                try:
-                    browser = engine.chromium.launch(headless=True, channel=channel, args=args)
-                    break
-                except PlaywrightError:
-                    continue
-            if browser is None:
-                raise FetchError("could not launch Chrome or bundled Chromium")
-            try:
-                context = browser.new_context(
-                    user_agent=USER_AGENT,
-                    locale=locale,
-                    timezone_id="Europe/Prague",
-                    viewport={"width": 1440, "height": 900},
-                    extra_http_headers={"Accept-Language": accept_language},
-                )
-                # A headless browser advertises itself via navigator.webdriver.
-                context.add_init_script(
-                    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
-                )
-                page = context.new_page()
-                page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
-                deadline = time.monotonic() + CHALLENGE_WAIT_SECONDS
-                last_content = page.content()
-                while looks_blocked(last_content) and time.monotonic() < deadline:
-                    page.wait_for_timeout(2000)
-                    last_content = page.content()
-            finally:
-                browser.close()
-    except FetchError:
-        raise
-    except Exception as exc:  # noqa: BLE001 - any driver failure is just a failed fetch
-        raise FetchError(f"playwright: {type(exc).__name__}: {exc}", last_content) from exc
-    return last_content
-
-
-FETCH_STRATEGIES = (
-    ("urllib", fetch_urllib),
-    ("curl", fetch_curl),
-    ("playwright", fetch_playwright),
-    ("chrome", fetch_chrome),
-)
-
-# When a scraping service is doing the fetching, it renders the page itself, so
-# driving a local browser at the API endpoint would only waste time and credits.
-DIRECT_STRATEGIES = (
-    ("urllib", fetch_urllib),
-    ("curl", fetch_curl),
-)
+        raise FetchError(f"{type(exc).__name__}: {exc}", transient=True) from exc
 
 
 def fetch(
@@ -386,33 +230,35 @@ def fetch(
     timeout: int = 30,
     debug_dir: Path | None = None,
     slug: str = "page",
-    strategies: tuple[tuple[str, Any], ...] | None = None,
-) -> tuple[str, str]:
-    """Try each client in turn; return (html, strategy_name) from the first that works.
+) -> str:
+    """Fetch a page, retrying once on a connection-level failure.
 
-    Every failure — including the body of a bot-check page — is written to
+    A response that is really a bot-check page counts as a failure: reporting
+    nothing is recoverable, recording a challenge page's stray number as the
+    price is not. Every failure — including the challenge body — is written to
     ``debug_dir`` so a failed run explains itself in the uploaded artifact.
     """
     problems: list[str] = []
-    for name, strategy in strategies or FETCH_STRATEGIES:
-        for attempt in range(2):
-            if attempt:
-                time.sleep(3)
-            try:
-                text = strategy(url, accept_language, timeout)
-            except FetchError as exc:
-                problems.append(f"{name}: {exc}")
-                if debug_dir and exc.body:
-                    save_debug(debug_dir, f"{slug}.{name}.failed.html", exc.body)
-                break  # a rejection is not transient; move to the next strategy
-            blocked = looks_blocked(text)
-            if blocked:
-                problems.append(f"{name}: {blocked}")
-                if debug_dir:
-                    save_debug(debug_dir, f"{slug}.{name}.blocked.html", text)
-                break
-            return text, name
-    raise FetchError("; ".join(problems) or "all fetch strategies failed")
+    for attempt in range(2):
+        if attempt:
+            time.sleep(3)
+        try:
+            text = fetch_urllib(url, accept_language, timeout)
+        except FetchError as exc:
+            problems.append(str(exc))
+            if debug_dir and exc.body:
+                save_debug(debug_dir, f"{slug}.failed.html", exc.body)
+            if exc.transient:
+                continue
+            break
+        blocked = looks_blocked(text)
+        if blocked:
+            problems.append(blocked)
+            if debug_dir:
+                save_debug(debug_dir, f"{slug}.blocked.html", text)
+            break
+        return text
+    raise FetchError("; ".join(problems) or "fetch failed")
 
 
 def save_debug(debug_dir: Path, filename: str, content: str) -> None:
@@ -730,205 +576,6 @@ def extract_price(page: str, item: dict) -> dict:
     return best
 
 
-# --------------------------------------------------------------------------- listing pages
-
-# Decathlon's own pages are behind a Cloudflare challenge that an unattended runner
-# cannot clear, so prices are read from a price-comparison search listing instead.
-# A listing holds many products, so each item says which result is which.
-
-PRICE_IN_TEXT = re.compile(
-    r"(?:od\s*)?(\d{1,3}(?:[\s ]?\d{3})*(?:[.,]\d{1,2})?)\s*(Kč|€|EUR|CZK)",
-    re.IGNORECASE,
-)
-
-# How many text nodes after a product name may hold its price. A card renders the
-# name, then rating/shop/availability, then the price.
-NAME_TO_PRICE_WINDOW = 25
-
-
-def fold(text: str) -> str:
-    """Lowercase and strip diacritics, so 'Polštář' matches 'polstar'."""
-    decomposed = unicodedata.normalize("NFKD", text.lower())
-    return "".join(char for char in decomposed if not unicodedata.combining(char))
-
-
-def contains_token(haystack: str, token: str) -> bool:
-    """Short tokens like 'xl' must match as whole words, not inside another word."""
-    folded_token = fold(token)
-    if len(folded_token) <= 3:
-        return re.search(rf"(?<![a-z0-9]){re.escape(folded_token)}(?![a-z0-9])", haystack) is not None
-    return folded_token in haystack
-
-
-def matches_item(name: str, item: dict) -> bool:
-    folded = fold(name)
-    if not all(contains_token(folded, token) for token in item.get("match_all", [])):
-        return False
-    return not any(contains_token(folded, token) for token in item.get("match_none", []))
-
-
-class TextExtractor(HTMLParser):
-    """Collect visible text nodes in document order."""
-
-    SKIP = {"script", "style", "noscript", "title", "head", "svg"}
-
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.segments: list[str] = []
-        self._depth = 0
-
-    def handle_starttag(self, tag, attrs):
-        if tag in self.SKIP:
-            self._depth += 1
-
-    def handle_endtag(self, tag):
-        if tag in self.SKIP and self._depth:
-            self._depth -= 1
-
-    def handle_data(self, data):
-        if self._depth:
-            return
-        text = " ".join(data.split())
-        if text:
-            self.segments.append(text)
-
-
-def visible_segments(page: str) -> list[str]:
-    # A reader proxy returns markdown or plain text rather than HTML; there the
-    # lines are already the segments.
-    if "</" not in page[:20000]:
-        return [line.strip() for line in page.splitlines() if line.strip()]
-    parser = TextExtractor()
-    try:
-        parser.feed(page)
-    except Exception:  # noqa: BLE001 - malformed markup must not abort the run
-        pass
-    return parser.segments
-
-
-def price_in(text: str, expect_currency: str | None) -> tuple[float, str] | None:
-    for match in PRICE_IN_TEXT.finditer(text):
-        currency = normalise_currency(match.group(2)) or CURRENCY_SYMBOLS.get(match.group(2))
-        price = to_number(match.group(1))
-        if price is None or not plausible(price, currency):
-            continue
-        if expect_currency and currency and currency != expect_currency:
-            continue
-        return price, currency or (expect_currency or "")
-    return None
-
-
-def listing_candidates_from_json(data: Any, item: dict) -> list[dict]:
-    """Any JSON object carrying both a matching name and a price."""
-    found: list[dict] = []
-    for node in iter_nodes(data):
-        keys = lowered(node)
-        name = keys.get("name") or keys.get("title") or keys.get("productname")
-        if not isinstance(name, str) or not matches_item(name, item):
-            continue
-        offers = keys.get("offers")
-        for offer in iter_nodes(offers) if offers else [node]:
-            if not isinstance(offer, dict):
-                continue
-            offer_keys = lowered(offer)
-            currency = next(
-                (
-                    normalise_currency(offer_keys[key])
-                    for key in CURRENCY_KEYS
-                    if normalise_currency(offer_keys.get(key))
-                ),
-                None,
-            )
-            for price_key in PRICE_KEYS:
-                value = offer_keys.get(price_key)
-                price = to_number(value.get("value") if isinstance(value, dict) else value)
-                if price is None or not plausible(price, currency or item.get("expect_currency")):
-                    continue
-                found.append(
-                    {
-                        "price": price,
-                        "currency": currency or item.get("expect_currency"),
-                        "method": "listing-json",
-                        "matched_name": name,
-                    }
-                )
-                break
-    return found
-
-
-def listing_candidates_from_text(segments: list[str], item: dict) -> list[dict]:
-    """Pair a product name with the first price that follows it in the card."""
-    expect = item.get("expect_currency")
-    found: list[dict] = []
-    for index, segment in enumerate(segments):
-        # A product name is a phrase, not a stray word or a whole paragraph.
-        if not (10 <= len(segment) <= 160) or not matches_item(segment, item):
-            continue
-        if price_in(segment, expect):
-            continue  # this segment is itself a price line, not a name
-        for offset in range(1, NAME_TO_PRICE_WINDOW + 1):
-            if index + offset >= len(segments):
-                break
-            hit = price_in(segments[index + offset], expect)
-            if hit:
-                found.append(
-                    {
-                        "price": hit[0],
-                        "currency": hit[1],
-                        "method": "listing-text",
-                        "matched_name": segment,
-                    }
-                )
-                break
-    return found
-
-
-def listing_overview(segments: list[str], limit: int = 12) -> list[str]:
-    """Product-looking names on the page, to explain a failed match."""
-    names: list[str] = []
-    for index, segment in enumerate(segments):
-        if not (10 <= len(segment) <= 160) or price_in(segment, None):
-            continue
-        window = segments[index + 1 : index + 1 + NAME_TO_PRICE_WINDOW]
-        if any(price_in(part, None) for part in window):
-            if segment not in names:
-                names.append(segment)
-        if len(names) >= limit:
-            break
-    return names
-
-
-def extract_from_listing(page: str, item: dict) -> dict:
-    candidates: list[dict] = []
-    for kind, blob in script_blobs(page):
-        try:
-            data = json.loads(blob.strip())
-        except (json.JSONDecodeError, ValueError):
-            continue
-        candidates.extend(listing_candidates_from_json(data, item))
-        del kind
-
-    segments = visible_segments(page)
-    if not candidates:
-        candidates.extend(listing_candidates_from_text(segments, item))
-
-    if not candidates:
-        seen = listing_overview(segments)
-        detail = "; ".join(seen) if seen else "no product-like entries found"
-        raise ParseError(
-            f"no listing entry matched {item.get('match_all')} "
-            f"(excluding {item.get('match_none')}). Products on the page: {detail}"
-        )
-
-    # Several variants of one product can match; the cheapest is the live offer.
-    best = min(candidates, key=lambda candidate: candidate["price"])
-    best["candidate_count"] = len(candidates)
-    best["all_candidates"] = [
-        f"{candidate['matched_name']} = {candidate['price']}" for candidate in candidates[:8]
-    ]
-    return best
-
-
 # --------------------------------------------------------------------------- reporting
 
 
@@ -968,18 +615,8 @@ def build_issue_body(drops: list[dict], checked_at: str) -> str:
             f"- Previous price seen by the watchdog: {money(drop['previous_price'], currency)}"
         )
         lines.append(f"- Buy at Decathlon: {drop['url']}")
-        if drop.get("source_url"):
-            lines.append(f"- Price read from: {drop['source_url']}")
-        if drop.get("matched_name"):
-            lines.append(f"- Matched listing entry: `{drop['matched_name']}`")
         lines.append("")
-    lines.append(
-        "_Prices come from the Heureka comparison listing, because Decathlon's own pages are "
-        "behind a Cloudflare challenge. Heureka shows the cheapest offer across shops, so "
-        "confirm on the Decathlon page before buying._"
-    )
-    lines.append("")
-    lines.append(f"_Checked at {checked_at}._")
+    lines.append(f"_Read from the Decathlon product page. Checked at {checked_at}._")
     return "\n".join(lines)
 
 
@@ -1032,17 +669,14 @@ def main() -> int:
     # HTML of successful fetches.
     debug_dir = Path(args.save_html) if args.save_html else Path("debug")
 
-    # Two search pages cover all four items, so fetch each page only once.
-    pages: dict[str, tuple[str, str]] = {}
+    # Two items could share a page; fetch each distinct URL only once, because
+    # every fetch costs a scraping credit.
+    pages: dict[str, str] = {}
 
     for item in items:
-        # A listing item reads its price off a search page; a direct item reads its
-        # own product page. Both are supported so the source can be switched back.
-        listing = "search_url" in item
-        url = item["search_url"] if listing else item["url"]
-        link = item.get("product_url", url)
-        key = item.get("id", link)
-        name = item.get("name", link)
+        url = item["url"]
+        key = item.get("id", url)
+        name = item.get("name", url)
         # The slug comes from the plain URL, never the templated one, so an API key
         # cannot end up in a debug filename.
         slug = re.sub(r"[^a-zA-Z0-9]+", "-", url).strip("-")[-80:]
@@ -1058,7 +692,7 @@ def main() -> int:
 
         proxied = fetch_urls != [url]
         if url not in pages:
-            pages[url] = ("", "")
+            pages[url] = ""
             problems: list[str] = []
             # Templates are ordered cheapest first; stop at the first that works so
             # the expensive tiers are only paid for when they are actually needed.
@@ -1070,28 +704,27 @@ def main() -> int:
                         timeout=90 if proxied else 30,
                         debug_dir=debug_dir,
                         slug=f"{slug}.tier{tier}" if proxied else slug,
-                        strategies=DIRECT_STRATEGIES if proxied else None,
                     )
                     if tier > 1:
                         print(f"::warning::{url}: needed proxy tier {tier}", flush=True)
                     if args.save_html:
-                        save_debug(debug_dir, f"{slug}.ok.html", pages[url][0])
+                        save_debug(debug_dir, f"{slug}.ok.html", pages[url])
                     break
                 except FetchError as exc:
                     problems.append(f"tier {tier}: {redact(str(exc))}")
-            if not pages[url][0]:
+            if not pages[url]:
                 print(f"::error::{url}: fetch failed ({'; '.join(problems)})", flush=True)
-        page, strategy = pages[url]
+        page = pages[url]
         if not page:
             failures.append(f"{name}: fetch failed")
             continue
 
         try:
-            result = extract_from_listing(page, item) if listing else extract_price(page, item)
+            result = extract_price(page, item)
         except ParseError as exc:
             save_debug(debug_dir, f"{slug}.unparsed.html", page)
             failures.append(f"{name}: {exc}")
-            print(f"::error::{name}: {exc} (fetched via {strategy})", flush=True)
+            print(f"::error::{name}: {exc}", flush=True)
             continue
 
         price = result["price"]
@@ -1110,13 +743,11 @@ def main() -> int:
             drops.append(
                 {
                     "name": name,
-                    "url": link,
-                    "source_url": url,
+                    "url": url,
                     "price": price,
                     "previous_price": float(previous_price),
                     "currency": currency,
                     "was_price": result.get("was_price"),
-                    "matched_name": result.get("matched_name"),
                 }
             )
         elif previous_price is None:
@@ -1125,15 +756,10 @@ def main() -> int:
         print(
             f"{name}: {money(price, currency)} "
             f"(previous: {money(previous_price, previous_currency) if previous_price else 'n/a'}, "
-            f"via: {strategy}, source: {result['method']}, "
+            f"source: {result['method']}, "
             f"candidates: {result['candidate_count']}){note}",
             flush=True,
         )
-        # The listing holds many products, so record which row the price came from.
-        if result.get("matched_name"):
-            print(f"    matched listing entry: {result['matched_name']!r}", flush=True)
-        for extra in result.get("all_candidates", [])[1:]:
-            print(f"    other match: {extra}", flush=True)
 
         entry = {
             "name": name,
@@ -1142,8 +768,6 @@ def main() -> int:
             "source": result["method"],
             "last_checked": checked_at,
         }
-        if result.get("matched_name"):
-            entry["matched_listing_entry"] = result["matched_name"]
         if result.get("was_price"):
             entry["listed_original_price"] = result["was_price"]
         entry["last_changed"] = (
