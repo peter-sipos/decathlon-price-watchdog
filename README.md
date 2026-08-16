@@ -1,8 +1,8 @@
 # Decathlon price watchdog
 
-A free GitHub Actions workflow that checks four Decathlon CZ/SK pillow listings once a
-day and opens a GitHub issue — which GitHub emails to you — whenever one of them gets
-cheaper.
+A free GitHub Actions workflow that checks four Decathlon CZ/SK pillow listings every
+four days and opens a GitHub issue — which GitHub emails to you — whenever one of them
+gets cheaper.
 
 Prices come straight from the Decathlon product pages, fetched through a scraping
 service because Decathlon blocks GitHub's runners at the Cloudflare layer. See *Why a
@@ -90,10 +90,10 @@ credits per request rather than one. Exact costs vary by provider and change ove
 so check your dashboard after the first few runs — treat the numbers below as arithmetic
 to redo against your own plan, not as quoted prices.
 
-One run costs **4 requests**, one per product — roughly 120 a month, which the cheapest
-tier handles comfortably inside a typical 1,000-credit allowance. If requests start
-escalating to the most expensive tier, a daily schedule could exceed it; switch to every
-other day (`0 5 */2 * *`).
+One run costs **4 requests**, one per product — roughly 30 a month on the current
+every-four-days schedule, well inside a typical 1,000-credit allowance even if every
+request escalated to the most expensive tier. Shortening the schedule raises that count
+proportionally — a daily run would be roughly 120 a month.
 
 Challenge pages are still detected on the way in, so if the service ever returns one, the
 run fails loudly rather than inventing a price.

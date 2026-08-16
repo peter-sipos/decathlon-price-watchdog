@@ -3,7 +3,10 @@ name: Decathlon price watch
 on:
   schedule:
     # 05:00 UTC = 07:00 Europe/Prague in summer, 06:00 in winter.
-    - cron: "0 5 * * *"
+    # Cron has no "every N days" field, so day-of-month */4 is used instead;
+    # it resets at the start of each month, so the gap is occasionally 1-3
+    # days short right at a month boundary rather than exactly 4 days.
+    - cron: "0 5 */4 * *"
   workflow_dispatch:
 
 permissions:
