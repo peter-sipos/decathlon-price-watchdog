@@ -2,7 +2,7 @@
   "cz-ultim-comfort": {
     "currency": "CZK",
     "last_changed": "2026-08-16T07:17:12+00:00",
-    "last_checked": "2026-08-29T11:24:34+00:00",
+    "last_checked": "2026-09-01T09:39:12+00:00",
     "name": "Polštář Ultim Comfort (Decathlon CZ)",
     "price": 499.0,
     "source": "ld+json:price"
@@ -10,7 +10,7 @@
   "cz-ultim-comfort-xl": {
     "currency": "CZK",
     "last_changed": "2026-08-16T07:17:12+00:00",
-    "last_checked": "2026-08-29T11:24:34+00:00",
+    "last_checked": "2026-09-01T09:39:12+00:00",
     "name": "Polštář Ultim Comfort XL (Decathlon CZ)",
     "price": 749.0,
     "source": "ld+json:price"
@@ -18,7 +18,7 @@
   "sk-ultim-comfort": {
     "currency": "EUR",
     "last_changed": "2026-08-16T07:17:12+00:00",
-    "last_checked": "2026-08-29T11:24:34+00:00",
+    "last_checked": "2026-09-01T09:39:12+00:00",
     "name": "Kempingový vankúš Ultim Comfort (Decathlon SK)",
     "price": 19.95,
     "source": "ld+json:price"
@@ -26,7 +26,7 @@
   "sk-ultim-comfort-xl": {
     "currency": "EUR",
     "last_changed": "2026-08-16T07:17:12+00:00",
-    "last_checked": "2026-08-29T11:24:34+00:00",
+    "last_checked": "2026-09-01T09:39:12+00:00",
     "name": "Kempingový vankúš XL Ultim Comfort (Decathlon SK)",
     "price": 29.95,
     "source": "ld+json:price"
