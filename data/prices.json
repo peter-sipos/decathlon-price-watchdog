@@ -18,7 +18,8 @@
   "sk-ultim-comfort": {
     "currency": "EUR",
     "last_changed": "2026-08-16T07:17:12+00:00",
-    "last_checked": "2026-10-25T09:29:16+00:00",
+    "last_checked": "2026-10-29T11:10:22+00:00",
+    "listed_original_price": 25.95,
     "name": "Kempingový vankúš Ultim Comfort (Decathlon SK)",
     "price": 19.95,
     "source": "ld+json:price"
@@ -26,7 +27,7 @@
   "sk-ultim-comfort-xl": {
     "currency": "EUR",
     "last_changed": "2026-08-16T07:17:12+00:00",
-    "last_checked": "2026-10-25T09:29:16+00:00",
+    "last_checked": "2026-10-29T11:10:22+00:00",
     "name": "Kempingový vankúš XL Ultim Comfort (Decathlon SK)",
     "price": 29.95,
     "source": "ld+json:price"
